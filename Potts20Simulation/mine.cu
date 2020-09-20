@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -10,7 +11,7 @@
 #include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define BLOCKS 200
+#define BLOCKS 200 // max is 200
 //#define MAX_THREADS 256 // curand property
 //#define MAX_NGENERATORS BLOCKS * THREADS
 
@@ -91,7 +92,7 @@ __host__ __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neib
 }
 
 
-__host__ void deviceEnergy(char* s, int* E, int R, int L, int N) {
+__global__ void deviceEnergy(char* s, int* E, int R, int L, int N) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int sum = 0;
 	for (int j = 0; j < N; j++) {
@@ -115,31 +116,7 @@ void CalcPrintAvgE(std::ofstream& efile, int* E, int U, int R) {
 	efile << U << " " << avg << std::endl;
 }
 
-// Part of disordered cluster histogram algorithm
-int BFS(char* s, int start, bool* visited, int L, int N, int replica_shift) {
-
-	std::queue<int> BFS_queue;
-	BFS_queue.push(start);
-	visited[start] = 1;
-	int clusterSize = 0;
-	char spinValue = s[start + replica_shift];
-
-	while (!BFS_queue.empty()) {
-		int currentIndex = BFS_queue.front();
-		BFS_queue.pop();
-		clusterSize++;
-		struct neibors_indexes n = SLF(currentIndex, L, N);
-		std::vector<int> possibleIndexes = { n.up, n.down, n.left, n.right };
-		for (int newIndex : possibleIndexes)
-			if ((s[newIndex + replica_shift] == spinValue) && (!visited[newIndex])) {
-				BFS_queue.push(newIndex);
-				visited[newIndex] = 1;
-			}
-	}
-	return clusterSize;
-}
-
-__host__ void cudaReplicaBFS(char* s, int* E, bool* visited, int* clusterSizeArray, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
+__global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 	int stack_index = 0;
@@ -159,13 +136,12 @@ __host__ void cudaReplicaBFS(char* s, int* E, bool* visited, int* clusterSizeArr
 					int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
 					for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
 						int suggestedIndex = possibleIndexes[indexIndex];
-						if (!deviceVisited[replica_shift + indexIndex] && s[replica_shift + suggestedIndex] == spinValue) {
+						if (!deviceVisited[replica_shift + suggestedIndex] && s[replica_shift + suggestedIndex] == spinValue) {
 							deviceStack[replica_shift + stack_index++] = suggestedIndex;
-							deviceVisited[replica_shift + suggestedIndex];
+							deviceVisited[replica_shift + suggestedIndex] = 1;
 						}
 					}
 				}
-
 				int reductionRes = warpReduceSum(1);
 				if ((threadIdx.x & (warpSize - 1)) == 0)
 					atomicAdd(deviceClusterSizeArray + currentClusterSize, reductionRes);
@@ -189,39 +165,17 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int R, int U, std::ofst
 	cudaMemset(deviceVisited, 0, N * R * sizeof(bool));
 	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(bool));
 
-	cudaReplicaBFS<<<BLOCKS, grid_width>>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaReplicaBFS<<<BLOCKS, R / BLOCKS>>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
 	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, R * sizeof(int), cudaMemcpyDeviceToHost);
-	/*
-	for (int r = 0; r < R; r++) {
-		std::vector<bool> visited(N); // default-false for every replica
-		int replica_shift = r * N;
-		if (E[r] == U - 1 && HistNumber < MaxHistNumber) {
-			HistNumber++;
-			// Go sequentially through lattice and assign spins to clusters
-			for (int i = 0; i < N; i++) {
-				if (!visited[i]) {
-					int currentClusteSize = BFS(s, i, visited, L, N, replica_shift);
-					clusterSizeFreqMap[currentClusteSize]++;
-				}
-			}
-		}
-		else if (HistNumber >= MaxHistNumber)
-			break;
-	}
-
-	*/
+	chfile << U << " ";
 	// write results to output files
-/*	if (HistNumber > 0) {
-		chfile << HistNumber << " ";
-		for (auto& item : clusterSizeFreqMap) {
-			int size = item.first;
-			int freq = item.second;
-			chfile << size << " " << freq << " ";
-		}
-		chfile << std::endl;
-}
-*/
-
+	for (int i = 0; i < N; i++) {
+		int size = i;
+		int freq = hostClusterSizeArray[i];
+		if (freq > 0)
+			chfile << size << ", " << freq << "; ";
+	}
+	chfile << std::endl;
 }
 
 void CalculateRhoT(const int* replicaFamily, int R, std::ofstream& ptfile, int U) {
@@ -238,9 +192,6 @@ void CalculateRhoT(const int* replicaFamily, int R, std::ofstream& ptfile, int U
 	ptfile << U << " " << sum << std::endl;
 	free(famHist);
 }
-
-
-// device functions
 
 __global__ void initializePopulation(curandStateMtgp32* state, char* s, int N, int q, int R) {
 	/*---------------------------------------------------------------------------------------------
@@ -276,7 +227,7 @@ __global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, in
 }
 
 void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, std::ofstream& e2file, std::ofstream& Xfile) {
-	qsort(O, R, sizeof(int), [E](int* a, int* b) {return E[*b] - E[*a]; }); // descending order
+	std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
 	int nCull = 0;
 	e2file << U << " " << E[O[0]] << std::endl;
 	while (E[O[nCull]] == U - 1) {
@@ -316,30 +267,6 @@ __global__ void updateReplicas(char* s, int* E, int* update, int N, int R) {
 		}
 		E[r] = E[update[r]];
 	}
-}
-
-template<class T>
-void PrintVector(const T& v, std::string prefix) {
-	std::cout << prefix;
-	for (auto& item : v)
-		std::cout << item << " ";
-	std::cout << std::endl;
-}
-
-void PrintArray(char* s, std::string prefix, int L, int R) {
-	std::cout << prefix << std::endl;
-	int N = L * L;
-	for (int r = 0; r < R; r++) {
-		std::cout << "replica " << r << std::endl;
-		for (int i = 0; i < L; i++) {
-			for (int j = 0; j < L; j++) {
-				std::cout << (int)s[j + i * L + r * N] << "\t";
-			}
-			std::cout << std::endl;
-		}
-		std::cout << std::endl;
-	}
-	std::cout << std::endl;
 }
 
 int main(int argc, char* argv[]) {
