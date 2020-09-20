@@ -8,6 +8,8 @@
 #include <vector>
 #include <map>
 
+#include "omp.h"
+
 #include <cuda.h>
 #include <curand_kernel.h>
 #include <curand_mtgp32_host.h>
@@ -150,6 +152,7 @@ void makeClusterHistogram(char* s, thrust::host_vector<int>& E, int q, int N, in
 	-------------------------------------------------------------------------------------------------*/
 	std::map<int, int> clusterSizeFreqMap; // should be safe to assume the default value as 0 (?)
 	int HistNumber = 0;
+	#pragma omp for
 	for (int r = 0; r < R; r++) {
 		std::vector<bool> visited(N); // default-false for every replica
 		int replica_shift = r * N;
@@ -159,6 +162,7 @@ void makeClusterHistogram(char* s, thrust::host_vector<int>& E, int q, int N, in
 			for (int i = 0; i < N; i++) {
 				if (!visited[i]) {
 					int currentClusteSize = BFS(s, i, visited, L, N, replica_shift);
+					#pragma omp atomic
 					clusterSizeFreqMap[currentClusteSize]++;
 				}
 			}
@@ -172,8 +176,9 @@ void makeClusterHistogram(char* s, thrust::host_vector<int>& E, int q, int N, in
 		for (auto& item : clusterSizeFreqMap) {
 			int size = item.first;
 			int freq = item.second;
-			chfile << size << " " << freq << std::endl;
+			chfile << size << " " << freq << " ";
 		}
+		chfile << std::endl;
 	}
 }
 
@@ -378,7 +383,7 @@ int main(int argc, char* argv[]) {
 		nfile << U << " " << nSteps << std::endl;
 		std::cout << "U:\t" << U << " out of " << -2 * N << "; nSteps: " << nSteps << ";" << std::endl;
 		// Perform monte carlo sweeps on gpu
-		equilibrate << <BLOCKS, grid_width >> > (devMTGPStates, deviceSpin, deviceEPointer, L, N, R, q, nSteps, U);
+		equilibrate<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, deviceEPointer, L, N, R, q, nSteps, U);
 		//		PrintArray(hostSpin, "s", L, R); // debug
 		hostE = deviceE;
 		//		PrintVector(hostE, "E "); // debug
@@ -396,14 +401,14 @@ int main(int argc, char* argv[]) {
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
 		U--;
-		//		PrintVector(energyOrder, "O "); // debug
-		//		PrintVector(hostUpdate, "update "); // debug
+//		PrintVector(energyOrder, "O "); // debug
+//		PrintVector(hostUpdate, "update "); // debug
 				// copy list of replicas to update back to gpu
 		deviceUpdate = hostUpdate;
-		updateReplicas << <BLOCKS, grid_width >> > (deviceSpin, deviceEPointer, deviceUpdatePointer, N, R);
-		//		cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost); // debug
-		//		PrintArray(hostSpin, "s_updated", L, R); // debug
-		//		PrintVector(replicaFamily, "replicaFamily "); // debug
+		updateReplicas<<<BLOCKS, grid_width>>>(deviceSpin, deviceEPointer, deviceUpdatePointer, N, R);
+//		cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost); // debug
+//		PrintArray(hostSpin, "s_updated", L, R); // debug
+//		PrintVector(replicaFamily, "replicaFamily "); // debug
 	}
 	CalcPrintAvgE(efile, hostE, U, R);
 
