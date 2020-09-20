@@ -34,9 +34,9 @@
 		N					fixed number of spins (N=L^2)
 		j					current index inside alone replica
 		q					Potts model parameter
-		e					new spin value (char) 
+		e					new spin value (char)
 		n_i					neibors indexes inside alone replica
-		n					neibors spin values 
+		n					neibors spin values
 		replicaFamily		family (index of source replica after number of resamples); used to measure rho t
 		rho_t				wtf value for checking equilibrium quality; A suitable condition is that rho_t << R
 		energyOrder			ordering array, used during resampling step of algorithm
@@ -83,7 +83,7 @@ __host__ __device__ struct neibors get_neibors_values(char* s, struct neibors_in
 
 
 __host__ __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
-	return - (currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
+	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
 }
 __host__ __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
 	return LocalE(suggestedSpin, n) - LocalE(currentSpin, n);
@@ -111,7 +111,7 @@ void CalcPrintAvgE(std::ofstream& efile, const thrust::host_vector<int>& E, int 
 		avg += E[i];
 	avg /= R;
 	efile << U << " " << avg << std::endl;
-}	
+}
 
 // Part of disordered cluster histogram algorithm
 int BFS(char* s, int start, std::vector<bool>& visited, int L, int N, int replica_shift) {
@@ -196,7 +196,7 @@ void CalculateRhoT(const thrust::host_vector<int>& replicaFamily, int R, std::of
 
 __global__ void initializePopulation(curandStateMtgp32* state, char* s, int N, int q, int R) {
 	/*---------------------------------------------------------------------------------------------
-		Initializes population on gpu(!) by randomly assigning each spin a value from 0 to q-1 
+		Initializes population on gpu(!) by randomly assigning each spin a value from 0 to q-1
 	----------------------------------------------------------------------------------------------*/
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	for (int k = 0; k < N; k++) {
@@ -228,8 +228,8 @@ __global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, in
 	}
 }
 
-void resample(const thrust::host_vector<int>& E, thrust::host_vector<int>& O, thrust::host_vector<int>& update, 
-								thrust::host_vector<int>& replicaFamily, int R, int U, std::ofstream& e2file, std::ofstream& Xfile) {
+void resample(const thrust::host_vector<int>& E, thrust::host_vector<int>& O, thrust::host_vector<int>& update,
+	thrust::host_vector<int>& replicaFamily, int R, int U, std::ofstream& e2file, std::ofstream& Xfile) {
 	//quicksort(E, O, 0, R - 1); // Sorts O by energy
 	thrust::sort(O.begin(), O.end(), [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
 	int nCull = 0;
@@ -356,11 +356,11 @@ int main(int argc, char* argv[]) {
 	std::srand(seed);
 
 	// Actually working part
-	initializePopulation<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, N, q, R);
+	initializePopulation << <BLOCKS, grid_width >> > (devMTGPStates, deviceSpin, N, q, R);
 	cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost);
-//	PrintArray(hostSpin, "s", L, R); // debug
+	//	PrintArray(hostSpin, "s", L, R); // debug
 	hostEnergy(hostSpin, hostE, R, L, N);
-//	PrintVector(hostE, "E "); // debug
+	//	PrintVector(hostE, "E "); // debug
 	deviceE = hostE;
 
 	int loop = 0;
@@ -378,10 +378,10 @@ int main(int argc, char* argv[]) {
 		nfile << U << " " << nSteps << std::endl;
 		std::cout << "U:\t" << U << " out of " << -2 * N << "; nSteps: " << nSteps << ";" << std::endl;
 		// Perform monte carlo sweeps on gpu
-		equilibrate<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, deviceEPointer, L, N, R, q, nSteps, U);
-//		PrintArray(hostSpin, "s", L, R); // debug
+		equilibrate << <BLOCKS, grid_width >> > (devMTGPStates, deviceSpin, deviceEPointer, L, N, R, q, nSteps, U);
+		//		PrintArray(hostSpin, "s", L, R); // debug
 		hostE = deviceE;
-//		PrintVector(hostE, "E "); // debug
+		//		PrintVector(hostE, "E "); // debug
 
 		int numHist = 100000;
 		// Create disordered cluster size histogram in particular energy range
@@ -396,14 +396,14 @@ int main(int argc, char* argv[]) {
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
 		U--;
-//		PrintVector(energyOrder, "O "); // debug
-//		PrintVector(hostUpdate, "update "); // debug
-		// copy list of replicas to update back to gpu
+		//		PrintVector(energyOrder, "O "); // debug
+		//		PrintVector(hostUpdate, "update "); // debug
+				// copy list of replicas to update back to gpu
 		deviceUpdate = hostUpdate;
-		updateReplicas<<<BLOCKS, grid_width>>>(deviceSpin, deviceEPointer, deviceUpdatePointer, N, R);
-//		cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost); // debug
-//		PrintArray(hostSpin, "s_updated", L, R); // debug
-//		PrintVector(replicaFamily, "replicaFamily "); // debug
+		updateReplicas << <BLOCKS, grid_width >> > (deviceSpin, deviceEPointer, deviceUpdatePointer, N, R);
+		//		cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost); // debug
+		//		PrintArray(hostSpin, "s_updated", L, R); // debug
+		//		PrintVector(replicaFamily, "replicaFamily "); // debug
 	}
 	CalcPrintAvgE(efile, hostE, U, R);
 
@@ -418,7 +418,7 @@ int main(int argc, char* argv[]) {
 	ptfile.close();
 	nfile.close();
 	chfile.close();
-	
+
 	// End
 	return 0;
 }
