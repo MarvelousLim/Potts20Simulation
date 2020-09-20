@@ -168,22 +168,22 @@ return sum;
 }
 
 // Initializes spin lookup table for efficiency
-void initializeSLT(int* SLT,int N,int L){
+void initializeSLT(int* SLT, int N, int L) {
     int next0;
     int next1;
     int next2;
     int next3;
-    int d=4;
-    for(int i=0;i<N;i++){
-        next0=(i+1)%L+L*(i/L);
-        next1=(i+L-1)%L+L*(i/L);
-        next2=(i+L)%(L*L)+(L*L)*(i/(L*L));
-        next3=(i+(L*L)-L)%(L*L)+(L*L)*(i/(L*L));
-        SLT[d*i]=next0;
-        SLT[d*i+1]=next1;
-        SLT[d*i+2]=next2;
-        SLT[d*i+3]=next3;
-      }
+    int d = 4;
+    for (int i = 0; i < N; i++) {
+        next0 = (i + 1) % L + L * (i / L);
+        next1 = (i + L - 1) % L + L * (i / L);
+        next2 = (i + L) % (L * L) + (L * L) * (i / (L * L));
+        next3 = (i + (L * L) - L) % (L * L) + (L * L) * (i / (L * L));
+        SLT[d * i] = next0;
+        SLT[d * i + 1] = next1;
+        SLT[d * i + 2] = next2;
+        SLT[d * i + 3] = next3;
+    }
 }
 
 // initializes random number generator on gpu
