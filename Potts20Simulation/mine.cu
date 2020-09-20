@@ -11,7 +11,7 @@
 #include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define BLOCKS 200 // max is 200
+#define BLOCKS 1 // max is 200
 //#define MAX_THREADS 256 // curand property
 //#define MAX_NGENERATORS BLOCKS * THREADS
 
@@ -53,8 +53,6 @@ __device__ int warpReduceSum(int val)
 		val += __shfl_down_sync(FULL_MASK, val, offset);
 	return val;
 }
-
-// more or less host function
 
 struct neibors_indexes {
 	int up;
@@ -103,9 +101,7 @@ __global__ void deviceEnergy(char* s, int* E, int R, int L, int N) {
 		struct neibors n = get_neibors_values(s, n_i, replica_shift); // we look into r replica and j spin
 		sum += LocalE(i, n);
 	}
-	int reductionRes = warpReduceSum(sum / 2);
-	if ((threadIdx.x & (warpSize - 1)) == 0)
-		atomicAdd(E + r, reductionRes);
+	E[r] = sum / 2;
 }
 
 void CalcPrintAvgE(std::ofstream& efile, int* E, int U, int R) {
@@ -228,6 +224,7 @@ __global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, in
 
 void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, std::ofstream& e2file, std::ofstream& Xfile) {
 	std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
+
 	int nCull = 0;
 	e2file << U << " " << E[O[0]] << std::endl;
 	while (E[O[nCull]] == U - 1) {
@@ -268,6 +265,7 @@ __global__ void updateReplicas(char* s, int* E, int* update, int N, int R) {
 		E[r] = E[update[r]];
 	}
 }
+ 
 
 int main(int argc, char* argv[]) {
 	// Parameters:
@@ -309,6 +307,7 @@ int main(int argc, char* argv[]) {
 		energyOrder[i] = i;
 		replicaFamily[i] = i;
 	}
+
 	// Allocate memory on device
 	char* deviceSpin; // s, d_s
 	int* deviceE;
@@ -339,6 +338,7 @@ int main(int argc, char* argv[]) {
 	initializePopulation<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, N, q, R);
 	cudaMemset(deviceE, 0, R * sizeof(int));
 	deviceEnergy<<<BLOCKS, grid_width>>>(deviceSpin, deviceE, R, L, N);
+	cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 
 	int loop = 0;
 	while (U > -2 * N) {
@@ -356,6 +356,7 @@ int main(int argc, char* argv[]) {
 		std::cout << "U:\t" << U << " out of " << -2 * N << "; nSteps: " << nSteps << ";" << std::endl;
 		// Perform monte carlo sweeps on gpu
 		equilibrate<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, deviceE, L, N, R, q, nSteps, U);
+
 		// Create disordered cluster size histogram in particular energy range
 		if (U <= -1.5 * N)
 			makeClusterHistogram(deviceSpin, deviceE, N, L, R, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
@@ -368,7 +369,7 @@ int main(int argc, char* argv[]) {
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
 		U--;
 		// copy list of replicas to update back to gpu
-		deviceUpdate = hostUpdate;
+		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
 		updateReplicas<<<BLOCKS, grid_width>>>(deviceSpin, deviceE, deviceUpdate, N, R);
 	}
 	CalcPrintAvgE(efile, hostE, U, R);
