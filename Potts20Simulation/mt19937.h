@@ -6,15 +6,15 @@
 #define mt19937_N 624
 
 typedef struct{
-  unsigned mt[mt19937_N];
-  int mti;
+	unsigned mt[mt19937_N];
+	int mti;
 } mt19937_state;
 
-typedef struct{
-  unsigned mt_aligned[3*mt19937_N+5] __attribute__ ((aligned(16)));
-  unsigned out[3*mt19937_N+5] __attribute__ ((aligned(16)));
-  unsigned *mt;
-  int mti;
+typedef struct {
+	unsigned mt_aligned[3 * mt19937_N + 5] __attribute__((aligned(16)));
+	unsigned out[3 * mt19937_N + 5] __attribute__((aligned(16)));
+	unsigned* mt;
+	int mti;
 } mt19937_sse_state;
 
 __host__ void mt19937_init_device_consts_();

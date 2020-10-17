@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <cstdlib>
 #include <string>
 #include <iostream>
@@ -11,9 +12,9 @@
 #include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define BLOCKS 1 // max is 200
-//#define MAX_THREADS 256 // curand property
-//#define MAX_NGENERATORS BLOCKS * THREADS
+#define BLOCKS 64
+#define THREADS 256
+#define R BLOCKS * THREADS // BLOCKS * THREADS
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -45,15 +46,6 @@
 
 -------------------------------------------------------------------------------------------------------------*/
 
-#define FULL_MASK 0xffffffff
-
-__device__ int warpReduceSum(int val)
-{
-	for (int offset = warpSize >> 1; offset > 0; offset >>= 1)
-		val += __shfl_down_sync(FULL_MASK, val, offset);
-	return val;
-}
-
 struct neibors_indexes {
 	int up;
 	int down;
@@ -61,7 +53,7 @@ struct neibors_indexes {
 	int right;
 };
 
-__host__ __device__ struct neibors_indexes SLF(int j, int L, int N) {
+__device__ struct neibors_indexes SLF(int j, int L, int N) {
 	struct neibors_indexes result;
 	result.right = (j + 1) % L + L * (j / L);
 	result.left = (j - 1 + L) % L + L * (j / L); // L member is for positivity
@@ -77,20 +69,19 @@ struct neibors {
 	char right;
 };
 
-__host__ __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
+__device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
 	return { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
 }
 
-
-__host__ __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
+__device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
 	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
 }
-__host__ __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
+
+__device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
 	return LocalE(suggestedSpin, n) - LocalE(currentSpin, n);
 }
 
-
-__global__ void deviceEnergy(char* s, int* E, int R, int L, int N) {
+__global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int sum = 0;
 	for (int j = 0; j < N; j++) {
@@ -104,12 +95,13 @@ __global__ void deviceEnergy(char* s, int* E, int R, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(std::ofstream& efile, int* E, int U, int R) {
+void CalcPrintAvgE(std::ofstream& efile, int* E, int U) {
 	float avg = 0.0;
 	for (int i = 0; i < R; i++)
 		avg += E[i];
 	avg /= R;
 	efile << U << " " << avg << std::endl;
+	std::cout << "E:\t" << avg << std::endl;
 }
 
 __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
@@ -124,10 +116,12 @@ __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* devic
 				// bfs
 				char spinValue = s[replica_shift + i];
 				deviceStack[replica_shift + stack_index++] = i;
+				deviceVisited[replica_shift + i] = 1;
 
 				while (stack_index > 0) {
 					int currentIndex = deviceStack[replica_shift + --stack_index];
 					currentClusterSize++;
+					//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
 					struct neibors_indexes n = SLF(currentIndex, L, N);
 					int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
 					for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
@@ -138,16 +132,13 @@ __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* devic
 						}
 					}
 				}
-				int reductionRes = warpReduceSum(1);
-				if ((threadIdx.x & (warpSize - 1)) == 0)
-					atomicAdd(deviceClusterSizeArray + currentClusterSize, reductionRes);
+				atomicAdd(deviceClusterSizeArray + currentClusterSize - 1, 1);
 			}
 		}
 	}
-
 };
 
-void makeClusterHistogram(char* s, int* E, int N, int L, int R, int U, std::ofstream& chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
+void makeClusterHistogram(char* s, int* E, int N, int L, int U, std::ofstream& chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
 	/*------------------------------------------------------------------------------------------------
 		Disordered Cluster Histogram Algorithm
 		Steps to procedure:
@@ -159,14 +150,15 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int R, int U, std::ofst
 			- compile histogram of cluster sizes
 	-------------------------------------------------------------------------------------------------*/
 	cudaMemset(deviceVisited, 0, N * R * sizeof(bool));
-	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(bool));
+	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(int));
 
-	cudaReplicaBFS<<<BLOCKS, R / BLOCKS>>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
-	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, R * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaReplicaBFS<<<BLOCKS, THREADS >>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, N * sizeof(int), cudaMemcpyDeviceToHost);
+	
 	chfile << U << " ";
 	// write results to output files
 	for (int i = 0; i < N; i++) {
-		int size = i;
+		int size = i + 1;
 		int freq = hostClusterSizeArray[i];
 		if (freq > 0)
 			chfile << size << ", " << freq << "; ";
@@ -174,34 +166,36 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int R, int U, std::ofst
 	chfile << std::endl;
 }
 
-void CalculateRhoT(const int* replicaFamily, int R, std::ofstream& ptfile, int U) {
+void CalculateRhoT(const int* replicaFamily, std::ofstream& ptfile, int U) {
 	// histogram of family sizes
 	int* famHist = (int*)calloc(R, sizeof(int));
 	for (int i = 0; i < R; i++) {
 		famHist[replicaFamily[i]]++;
 	}
-	float sum = 0;
+	double sum = 0;
 	for (int i = 0; i < R; i++) {
 		sum += famHist[i] * famHist[i];
 	}
 	sum /= R;
 	ptfile << U << " " << sum << std::endl;
+	sum /= R;
+	std::cout << "RhoT:\t" << sum << std::endl;
 	free(famHist);
 }
 
-__global__ void initializePopulation(curandStateMtgp32* state, char* s, int N, int q, int R) {
+__global__ void initializePopulation(curandState* state, char* s, int N, int q) {
 	/*---------------------------------------------------------------------------------------------
 		Initializes population on gpu(!) by randomly assigning each spin a value from 0 to q-1
 	----------------------------------------------------------------------------------------------*/
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	for (int k = 0; k < N; k++) {
 		int arrayIndex = r * N + k;
-		char spin = curand(&state[blockIdx.x]) % q;
+		char spin = curand(&state[r]) % q;
 		s[arrayIndex] = spin;
 	}
 }
 
-__global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U) {
+__global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, int q, int nSteps, int U) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
@@ -209,9 +203,9 @@ __global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, in
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 	for (int k = 0; k < N * nSteps; k++) {
-		int j = curand(&state[blockIdx.x]) % N;
+		int j = curand(&state[r]) % N;
 		char currentSpin = s[j + replica_shift];
-		char suggestedSpin = curand(&state[blockIdx.x]) % q;
+		char suggestedSpin = curand(&state[r]) % q;
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
@@ -222,7 +216,7 @@ __global__ void equilibrate(curandStateMtgp32* state, char* s, int* E, int L, in
 	}
 }
 
-void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, std::ofstream& e2file, std::ofstream& Xfile) {
+void resample(int* E, int* O, int* update, int* replicaFamily, int U, std::ofstream& e2file, std::ofstream& Xfile) {
 	std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
 
 	int nCull = 0;
@@ -234,7 +228,8 @@ void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, std
 		}
 	}
 	// culling fraction
-	double X = (double)nCull / R;
+	double X = nCull;
+	X /= R;
 	Xfile << U << " " << X << std::endl;
 	std::cout << "Culling fraction:\t" << X << std::endl;
 	for (int i = 0; i < R; i++)
@@ -249,7 +244,7 @@ void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, std
 	}
 }
 
-__global__ void updateReplicas(char* s, int* E, int* update, int N, int R) {
+__global__ void updateReplicas(char* s, int* E, int* update, int N) {
 	/*---------------------------------------------------------------------------------------------
 		Updates the population after the resampling step (done on cpu) by replacing indicated
 		replicas by the proper other replica
@@ -266,6 +261,13 @@ __global__ void updateReplicas(char* s, int* E, int* update, int N, int R) {
 	}
 }
  
+__global__ void setup_kernel(curandState* state, int seed)
+{
+	int id = threadIdx.x + blockIdx.x * blockDim.x;
+	/* Each thread gets same seed, a different sequence
+	   number, no offset */
+	curand_init(seed, id, 1, &state[id]);
+}
 
 int main(int argc, char* argv[]) {
 	// Parameters:
@@ -273,20 +275,23 @@ int main(int argc, char* argv[]) {
 	int q = 20;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 	int U = 1;	// U is energy ceiling
 
+	/*
 	// random number generation
 	curandStateMtgp32* devMTGPStates;
 	mtgp32_kernel_params* devKernelParams;
+	*/
 
 	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
 	int seed = run_number;
-	int grid_width = atoi(argv[2]);	// should not be more than 256 due to MTGP32 limits
-	int L = atoi(argv[3]);	//Lattice size.  Total number of spins is N=L^2
+	//int grid_width = atoi(argv[2]);	// should not be more than 256 due to MTGP32 limits
+	int L = atoi(argv[2]);	//Lattice size.  Total number of spins is N=L^2
 	int N = L * L;
-	int R = grid_width * BLOCKS;	// Population size
+	//int R = grid_width * BLOCKS;	// Population size
 
+	
 	// initializing files to write in
 	std::stringstream s;
-	s << "datasets//L" << L << "_R" << R << "_run" << run_number;
+	s << "datasets//xorwow_L" << L << "_R" << R << "_run" << run_number;
 	std::string S = s.str();
 	std::ofstream efile(S + "e.txt", std::ofstream::trunc);	// average energy
 	std::ofstream e2file(S + "e2.txt", std::ofstream::trunc);	// surface (culled) energy
@@ -322,61 +327,63 @@ int main(int argc, char* argv[]) {
 	int* deviceClusterSizeArray;
 	int* deviceStack;
 	cudaMalloc((void**)&deviceVisited, N * R * sizeof(bool));
-	cudaMalloc((void**)&deviceClusterSizeArray, N * sizeof(bool));
+	cudaMalloc((void**)&deviceClusterSizeArray, N * sizeof(int));
 	cudaMalloc((void**)&deviceStack, N * R * sizeof(int));
 
+	/*
 	// Init MTGP32
 	cudaMalloc((void**)&devMTGPStates, BLOCKS * sizeof(curandStateMtgp32));
 	cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params));
 	curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams);
 	curandMakeMTGP32KernelState(devMTGPStates, mtgp32dc_params_fast_11213, devKernelParams, BLOCKS, seed);
+	*/
+	curandState* devStates;
+	cudaMalloc((void**)&devStates, R * sizeof(curandState));
+	setup_kernel<<<BLOCKS, THREADS>>>(devStates, seed);
+
 
 	// Init std random generator for little host part
 	std::srand(seed);
 
 	// Actually working part
-	initializePopulation<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, N, q, R);
+	initializePopulation<<<BLOCKS, THREADS>>>(devStates, deviceSpin, N, q);
 	cudaMemset(deviceE, 0, R * sizeof(int));
-	deviceEnergy<<<BLOCKS, grid_width>>>(deviceSpin, deviceE, R, L, N);
-	cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
+	deviceEnergy<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, L, N);
 
-	int loop = 0;
 	while (U > -2 * N) {
-		loop++;
 		// Adjust the sweep schedule
 		// Most sweeps are performed in the region when simulation is most difficult
 		if (U < -(3 * N / 2))
-			nSteps = 10;
+			nSteps = 2;
 		else if (U < -N / 2)
 			nSteps = 30;
 		else // (U >= -N / 2)
-			nSteps = 2;
+			nSteps = 10;
 
 		nfile << U << " " << nSteps << std::endl;
 		std::cout << "U:\t" << U << " out of " << -2 * N << "; nSteps: " << nSteps << ";" << std::endl;
 		// Perform monte carlo sweeps on gpu
-		equilibrate<<<BLOCKS, grid_width>>>(devMTGPStates, deviceSpin, deviceE, L, N, R, q, nSteps, U);
+		equilibrate<<<BLOCKS, THREADS>>>(devStates, deviceSpin, deviceE, L, N, q, nSteps, U);
 
 		// Create disordered cluster size histogram in particular energy range
 		if (U <= -1.5 * N)
-			makeClusterHistogram(deviceSpin, deviceE, N, L, R, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
+			makeClusterHistogram(deviceSpin, deviceE, N, L, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, hostE, U, R);
-		CalculateRhoT(replicaFamily, R, ptfile, U);
+		CalcPrintAvgE(efile, hostE, U);
+		CalculateRhoT(replicaFamily, ptfile, U);
 		// perform resampling step on cpu
-		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
+		resample(hostE, energyOrder, hostUpdate, replicaFamily, U, e2file, Xfile);
 		U--;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
-		updateReplicas<<<BLOCKS, grid_width>>>(deviceSpin, deviceE, deviceUpdate, N, R);
+		updateReplicas<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, deviceUpdate, N);
 	}
-	CalcPrintAvgE(efile, hostE, U, R);
-
+	CalcPrintAvgE(efile, hostE, U);
+	
 	// Free memory and close files
-	cudaFree(devMTGPStates);
-	cudaFree(devKernelParams);
+	cudaFree(devStates);
 	cudaFree(deviceSpin);
 	cudaFree(deviceE);
 	cudaFree(deviceUpdate);
@@ -389,13 +396,14 @@ int main(int argc, char* argv[]) {
 	free(replicaFamily);
 	free(energyOrder);
 	free(hostClusterSizeArray);
+	
 	efile.close();
 	e2file.close();
 	Xfile.close();
 	ptfile.close();
 	nfile.close();
 	chfile.close();
-
+	
 	// End
 	return 0;
 }
