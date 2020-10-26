@@ -1,10 +1,5 @@
 #include <stdio.h>
-#include <cstdlib>
-#include <string>
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <algorithm>
+#include <stdlib.h>
 
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -12,8 +7,8 @@
 #include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define BLOCKS 64
-#define THREADS 256
+#define BLOCKS 1024
+#define THREADS 512
 #define R BLOCKS * THREADS // BLOCKS * THREADS
 
 /*-----------------------------------------------------------------------------------------------------------
@@ -70,7 +65,8 @@ struct neibors {
 };
 
 __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
-	return { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
+	struct neibors result = { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
+	return result;
 }
 
 __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
@@ -95,13 +91,13 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(std::ofstream& efile, int* E, int U) {
+void CalcPrintAvgE(FILE * efile, int* E, int U) {
 	float avg = 0.0;
 	for (int i = 0; i < R; i++)
 		avg += E[i];
 	avg /= R;
-	efile << U << " " << avg << std::endl;
-	std::cout << "E:\t" << avg << std::endl;
+	fprintf(efile, "%d %f\n", U, avg);
+	printf("E: %f\n", avg);
 }
 
 __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
@@ -136,9 +132,9 @@ __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* devic
 			}
 		}
 	}
-};
+}
 
-void makeClusterHistogram(char* s, int* E, int N, int L, int U, std::ofstream& chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
+void makeClusterHistogram(char* s, int* E, int N, int L, int U, FILE * chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
 	/*------------------------------------------------------------------------------------------------
 		Disordered Cluster Histogram Algorithm
 		Steps to procedure:
@@ -150,23 +146,23 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int U, std::ofstream& c
 			- compile histogram of cluster sizes
 	-------------------------------------------------------------------------------------------------*/
 	cudaMemset(deviceVisited, 0, N * R * sizeof(bool));
-	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(int));
+	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(unsigned int));
 
 	cudaReplicaBFS<<<BLOCKS, THREADS >>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
 	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, N * sizeof(int), cudaMemcpyDeviceToHost);
 	
-	chfile << U << " ";
+	fprintf(chfile, "%d ", U);
 	// write results to output files
 	for (int i = 0; i < N; i++) {
 		int size = i + 1;
 		int freq = hostClusterSizeArray[i];
 		if (freq > 0)
-			chfile << size << ", " << freq << "; ";
+			fprintf(chfile, "%d, %d; ", size, freq);
 	}
-	chfile << std::endl;
+	fprintf(chfile, "\n");
 }
 
-void CalculateRhoT(const int* replicaFamily, std::ofstream& ptfile, int U) {
+void CalculateRhoT(const int* replicaFamily, FILE * ptfile, int U) {
 	// histogram of family sizes
 	int* famHist = (int*)calloc(R, sizeof(int));
 	for (int i = 0; i < R; i++) {
@@ -177,9 +173,9 @@ void CalculateRhoT(const int* replicaFamily, std::ofstream& ptfile, int U) {
 		sum += famHist[i] * famHist[i];
 	}
 	sum /= R;
-	ptfile << U << " " << sum << std::endl;
+	fprintf(ptfile, "%d %f\n", U, sum);
 	sum /= R;
-	std::cout << "RhoT:\t" << sum << std::endl;
+	printf("RhoT:\t%f\n", sum);
 	free(famHist);
 }
 
@@ -216,11 +212,46 @@ __global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, i
 	}
 }
 
-void resample(int* E, int* O, int* update, int* replicaFamily, int U, std::ofstream& e2file, std::ofstream& Xfile) {
-	std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
+void Swap(int* A, int i, int j) {
+	int temp = A[i];
+	A[i] = A[j];
+	A[j] = temp;
+}
+
+void quicksort(int* E, int* O, int left, int right) {
+	int Min = (left + right) / 2;
+	int i = left;
+	int j = right;
+	double pivot = E[O[Min]];
+
+	while (left < j || i < right)
+	{
+		while (E[O[i]] > pivot)
+			i++;
+		while (E[O[j]] < pivot)
+			j--;
+
+		if (i <= j) {
+			Swap(O, i, j);
+			i++;
+			j--;
+		} else {
+			if (left < j)
+				quicksort(E, O, left, j);
+			if (i < right)
+				quicksort(E, O, i, right);
+			return;
+		}
+	}
+}
+
+
+void resample(int* E, int* O, int* update, int* replicaFamily, int U, FILE * e2file, FILE * Xfile) {
+	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
+	quicksort(E, O, 0, R - 1); //Sorts O by energy
 
 	int nCull = 0;
-	e2file << U << " " << E[O[0]] << std::endl;
+	fprintf(e2file, "%d %d\n", U, E[O[0]]);
 	while (E[O[nCull]] == U - 1) {
 		nCull++;
 		if (nCull == R) {
@@ -230,14 +261,14 @@ void resample(int* E, int* O, int* update, int* replicaFamily, int U, std::ofstr
 	// culling fraction
 	double X = nCull;
 	X /= R;
-	Xfile << U << " " << X << std::endl;
-	std::cout << "Culling fraction:\t" << X << std::endl;
+	fprintf(Xfile, "%d %f\n", U, X);
+	printf("Culling fraction:\t%f\n", X);
 	for (int i = 0; i < R; i++)
 		update[i] = i;
 	if (nCull < R) {
 		for (int i = 0; i < nCull; i++) {
 			// random selection of unculled replica
-			int r = (std::rand() % (R - nCull)) + nCull; // different random number generator for
+			int r = (rand() % (R - nCull)) + nCull; // different random number generator for
 			update[O[i]] = O[r];
 			replicaFamily[O[i]] = replicaFamily[O[r]];
 		}
@@ -290,15 +321,19 @@ int main(int argc, char* argv[]) {
 
 	
 	// initializing files to write in
-	std::stringstream s;
-	s << "datasets//xorwow_L" << L << "_R" << R << "_run" << run_number;
-	std::string S = s.str();
-	std::ofstream efile(S + "e.txt", std::ofstream::trunc);	// average energy
-	std::ofstream e2file(S + "e2.txt", std::ofstream::trunc);	// surface (culled) energy
-	std::ofstream Xfile(S + "X.txt", std::ofstream::trunc);	// culling fraction
-	std::ofstream ptfile(S + "pt.txt", std::ofstream::trunc);	// rho t
-	std::ofstream nfile(S + "n.txt", std::ofstream::trunc);	// number of sweeps
-	std::ofstream chfile(S + "ch.txt", std::ofstream::trunc);	// cluster size histogram
+	char s[100];
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%de.txt", L, R, run_number);
+	FILE * efile = fopen(s, "w");	// average energy
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%de2.txt", L, R, run_number);
+	FILE * e2file = fopen(s, "w");	// surface (culled) energy
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%dX.txt", L, R, run_number);
+	FILE * Xfile = fopen(s, "w");	// culling fraction
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%dpt.txt", L, R, run_number);
+	FILE * ptfile = fopen(s, "w");	// rho t
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%dn.txt", L, R, run_number);
+	FILE * nfile = fopen(s, "w");	// number of sweeps
+	sprintf(s, "datasets//xorwor_L%d_R%d_run%dch.txt", L, R, run_number);
+	FILE * chfile = fopen(s, "w");	// cluster size histogram
 
 
 	size_t fullLatticeByteSize = R * N * sizeof(char);
@@ -343,7 +378,7 @@ int main(int argc, char* argv[]) {
 
 
 	// Init std random generator for little host part
-	std::srand(seed);
+	srand(seed);
 
 	// Actually working part
 	initializePopulation<<<BLOCKS, THREADS>>>(devStates, deviceSpin, N, q);
@@ -360,8 +395,8 @@ int main(int argc, char* argv[]) {
 		else // (U >= -N / 2)
 			nSteps = 10;
 
-		nfile << U << " " << nSteps << std::endl;
-		std::cout << "U:\t" << U << " out of " << -2 * N << "; nSteps: " << nSteps << ";" << std::endl;
+		fprintf(nfile, "%d %d\n", U, nSteps);
+		printf("U:\t%d out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
 		// Perform monte carlo sweeps on gpu
 		equilibrate<<<BLOCKS, THREADS>>>(devStates, deviceSpin, deviceE, L, N, q, nSteps, U);
 
@@ -380,7 +415,6 @@ int main(int argc, char* argv[]) {
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
 		updateReplicas<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, deviceUpdate, N);
 	}
-	CalcPrintAvgE(efile, hostE, U);
 	
 	// Free memory and close files
 	cudaFree(devStates);
@@ -397,12 +431,12 @@ int main(int argc, char* argv[]) {
 	free(energyOrder);
 	free(hostClusterSizeArray);
 	
-	efile.close();
-	e2file.close();
-	Xfile.close();
-	ptfile.close();
-	nfile.close();
-	chfile.close();
+	fclose(efile);
+	fclose(e2file);
+	fclose(Xfile);
+	fclose(ptfile);
+	fclose(nfile);
+	fclose(chfile);
 	
 	// End
 	return 0;
