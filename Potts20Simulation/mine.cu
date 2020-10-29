@@ -7,9 +7,6 @@
 #include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define BLOCKS 1024
-#define THREADS 512
-#define R BLOCKS * THREADS // BLOCKS * THREADS
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -91,7 +88,7 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(FILE * efile, int* E, int U) {
+void CalcPrintAvgE(FILE * efile, int* E, int R, int U) {
 	float avg = 0.0;
 	for (int i = 0; i < R; i++)
 		avg += E[i];
@@ -100,41 +97,67 @@ void CalcPrintAvgE(FILE * efile, int* E, int U) {
 	printf("E: %f\n", avg);
 }
 
-__global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
-	int r = threadIdx.x + blockIdx.x * blockDim.x;
-	int replica_shift = r * N;
+__device__ int getBFSSize(char *s, int start, int replica_shift, int N, int L, bool* deviceVisited, int* deviceStack, bool colorBlindMode) {
+	// colorBlindMode disables check of spin value
+	int currentClusterSize = 0;
 	int stack_index = 0;
-	if (E[r] == U - 1) {
-		// Go sequentially through lattice and assign spins to clusters
-		for (int i = 0; i < N; i++) {
-			if (!deviceVisited[replica_shift + i]) {
-				int currentClusterSize = 0;
-				// bfs
-				char spinValue = s[replica_shift + i];
-				deviceStack[replica_shift + stack_index++] = i;
-				deviceVisited[replica_shift + i] = 1;
 
-				while (stack_index > 0) {
-					int currentIndex = deviceStack[replica_shift + --stack_index];
-					currentClusterSize++;
-					//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
-					struct neibors_indexes n = SLF(currentIndex, L, N);
-					int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
-					for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
-						int suggestedIndex = possibleIndexes[indexIndex];
-						if (!deviceVisited[replica_shift + suggestedIndex] && s[replica_shift + suggestedIndex] == spinValue) {
-							deviceStack[replica_shift + stack_index++] = suggestedIndex;
-							deviceVisited[replica_shift + suggestedIndex] = 1;
-						}
-					}
-				}
-				atomicAdd(deviceClusterSizeArray + currentClusterSize - 1, 1);
+	char spinValue = s[replica_shift + start];
+	deviceStack[replica_shift + stack_index++] = start;
+	deviceVisited[replica_shift + start] = 1;
+
+	while (stack_index > 0) {
+		int currentIndex = deviceStack[replica_shift + --stack_index];
+		currentClusterSize++;
+		//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
+		struct neibors_indexes n = SLF(currentIndex, L, N);
+		int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
+		for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
+			int suggestedIndex = possibleIndexes[indexIndex];
+			if (!deviceVisited[replica_shift + suggestedIndex] && (colorBlindMode || s[replica_shift + suggestedIndex] == spinValue)) {
+				deviceStack[replica_shift + stack_index++] = suggestedIndex;
+				deviceVisited[replica_shift + suggestedIndex] = 1;
 			}
 		}
 	}
+
+	return currentClusterSize;
 }
 
-void makeClusterHistogram(char* s, int* E, int N, int L, int U, FILE * chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
+__global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
+	int r = threadIdx.x + blockIdx.x * blockDim.x;
+	int replica_shift = r * N;
+	if (E[r] == U - 1) {
+		int argmax = 0;
+		int max = 0;
+		// Go sequentially through lattice and assign spins to clusters for first time
+		// to find main cluster
+		for (int i = 0; i < N; i++) {
+			if (!deviceVisited[replica_shift + i]) {
+				int currentClusterSize = getBFSSize(s, i, replica_shift, N, L, deviceVisited, deviceStack, false);
+				if (currentClusterSize > max) {
+					max = currentClusterSize;
+					argmax = i;
+				}
+			}
+		}
+		// now we know the main cluster; we want to return Visited to zero and then go again
+		for (int i = 0; i < N; i++)
+			deviceVisited[replica_shift + i] = 0;
+		// but without main cluster and spin-value check
+		int currentClusterSize = getBFSSize(s, argmax, replica_shift, N, L, deviceVisited, deviceStack, false);
+		for (int i = 0; i < N; i++) {
+			if (!deviceVisited[replica_shift + i]) {
+				// watch for colorBlindMode here
+				int currentClusterSize = getBFSSize(s, i, replica_shift, N, L, deviceVisited, deviceStack, true);
+				atomicAdd(deviceClusterSizeArray + currentClusterSize - 1, 1);
+			}
+		}
+
+	}
+}
+
+void makeClusterHistogram(char* s, int* E, int N, int L, int BLOCKS, int THREADS, int U, FILE * chfile, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack, int* hostClusterSizeArray) {
 	/*------------------------------------------------------------------------------------------------
 		Disordered Cluster Histogram Algorithm
 		Steps to procedure:
@@ -145,10 +168,10 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int U, FILE * chfile, b
 			+ I decided to calculate all cluster, because why not. Can always kill em on postcalc
 			- compile histogram of cluster sizes
 	-------------------------------------------------------------------------------------------------*/
-	cudaMemset(deviceVisited, 0, N * R * sizeof(bool));
+	cudaMemset(deviceVisited, 0, N * BLOCKS * THREADS * sizeof(bool));
 	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(unsigned int));
 
-	cudaReplicaBFS<<<BLOCKS, THREADS >>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaReplicaBFS<<<BLOCKS, THREADS>>>(s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
 	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, N * sizeof(int), cudaMemcpyDeviceToHost);
 	
 	fprintf(chfile, "%d ", U);
@@ -162,7 +185,7 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int U, FILE * chfile, b
 	fprintf(chfile, "\n");
 }
 
-void CalculateRhoT(const int* replicaFamily, FILE * ptfile, int U) {
+void CalculateRhoT(const int* replicaFamily, FILE * ptfile, int R, int U) {
 	// histogram of family sizes
 	int* famHist = (int*)calloc(R, sizeof(int));
 	for (int i = 0; i < R; i++) {
@@ -246,7 +269,7 @@ void quicksort(int* E, int* O, int left, int right) {
 }
 
 
-void resample(int* E, int* O, int* update, int* replicaFamily, int U, FILE * e2file, FILE * Xfile) {
+void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FILE * e2file, FILE * Xfile) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
 	quicksort(E, O, 0, R - 1); //Sorts O by energy
 
@@ -318,21 +341,24 @@ int main(int argc, char* argv[]) {
 	int L = atoi(argv[2]);	//Lattice size.  Total number of spins is N=L^2
 	int N = L * L;
 	//int R = grid_width * BLOCKS;	// Population size
+	int BLOCKS = atoi(argv[3]);
+	int THREADS = atoi(argv[4]);
+	int R = BLOCKS * THREADS;
 
 	
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%de.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%de.txt", L, R, run_number);
 	FILE * efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%de2.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%de2.txt", L, R, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%dX.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%dpt.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dpt.txt", L, R, run_number);
 	FILE * ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%dn.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dn.txt", L, R, run_number);
 	FILE * nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//xorwor_L%d_R%d_run%dch.txt", L, R, run_number);
+	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dch.txt", L, R, run_number);
 	FILE * chfile = fopen(s, "w");	// cluster size histogram
 
 
@@ -402,14 +428,14 @@ int main(int argc, char* argv[]) {
 
 		// Create disordered cluster size histogram in particular energy range
 		if (U <= -1.5 * N)
-			makeClusterHistogram(deviceSpin, deviceE, N, L, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
+			makeClusterHistogram(deviceSpin, deviceE, N, L, BLOCKS, THREADS, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, hostE, U);
-		CalculateRhoT(replicaFamily, ptfile, U);
+		CalcPrintAvgE(efile, hostE, R, U);
+		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
-		resample(hostE, energyOrder, hostUpdate, replicaFamily, U, e2file, Xfile);
+		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
 		U--;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
