@@ -127,7 +127,7 @@ __device__ int getBFSSize(char *s, int start, int replica_shift, int N, int L, b
 __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
-	if (E[r] == U - 1) {
+	if (E[r] == U + 1) {
 		int argmax = 0;
 		int max = 0;
 		// Go sequentially through lattice and assign spins to clusters for first time
@@ -209,8 +209,8 @@ __global__ void initializePopulation(curandState* state, char* s, int N, int q) 
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	for (int k = 0; k < N; k++) {
 		int arrayIndex = r * N + k;
-		char spin = curand(&state[r]) % q;
-		s[arrayIndex] = spin;
+		//char spin = curand(&state[r]) % q;
+		s[arrayIndex] = 0;// spin;
 	}
 }
 
@@ -228,7 +228,7 @@ __global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, i
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
-		if (E[r] + dE < U) {
+		if (E[r] + dE > U) {
 			E[r] = E[r] + dE;
 			s[j + replica_shift] = suggestedSpin;
 		}
@@ -241,17 +241,17 @@ void Swap(int* A, int i, int j) {
 	A[j] = temp;
 }
 
-void quicksort(int* E, int* O, int left, int right) {
+void quicksort(int* E, int* O, int left, int right, int cool) {
 	int Min = (left + right) / 2;
 	int i = left;
 	int j = right;
-	double pivot = E[O[Min]];
+	double pivot = cool * E[O[Min]];
 
 	while (left < j || i < right)
 	{
-		while (E[O[i]] > pivot)
+		while (cool * E[O[i]] > pivot)
 			i++;
-		while (E[O[j]] < pivot)
+		while (cool * E[O[j]] < pivot)
 			j--;
 
 		if (i <= j) {
@@ -260,9 +260,9 @@ void quicksort(int* E, int* O, int left, int right) {
 			j--;
 		} else {
 			if (left < j)
-				quicksort(E, O, left, j);
+				quicksort(E, O, left, j, cool);
 			if (i < right)
-				quicksort(E, O, i, right);
+				quicksort(E, O, i, right, cool);
 			return;
 		}
 	}
@@ -271,11 +271,19 @@ void quicksort(int* E, int* O, int left, int right) {
 
 void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FILE * e2file, FILE * Xfile) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
-	quicksort(E, O, 0, R - 1); //Sorts O by energy
+	quicksort(E, O, 0, R - 1, -1); //Sorts O by energy, cold = -1 means sort for heating
+
+	/*
+	printf("E: ");
+	for (int i = 0; i < R; i++) {
+		printf("%d ", E[O[i]]);
+	}
+	printf("\n");
+	*/
 
 	int nCull = 0;
 	fprintf(e2file, "%d %d\n", U, E[O[0]]);
-	while (E[O[nCull]] == U - 1) {
+	while (E[O[nCull]] == U + 1) {
 		nCull++;
 		if (nCull == R) {
 			break;
@@ -327,7 +335,6 @@ int main(int argc, char* argv[]) {
 	// Parameters:
 	int nSteps = 1;
 	int q = 20;	// q parameter for potts model, each spin variable can take on values 0 - q-1
-	int U = 1;	// U is energy ceiling
 
 	/*
 	// random number generation
@@ -348,17 +355,17 @@ int main(int argc, char* argv[]) {
 	
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%de.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%de.txt", L, R, run_number);
 	FILE * efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%de2.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%de2.txt", L, R, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dX.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dpt.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%dpt.txt", L, R, run_number);
 	FILE * ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dn.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%dn.txt", L, R, run_number);
 	FILE * nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dch.txt", L, R, run_number);
+	sprintf(s, "datasets//heat_L%d_R%d_run%dch.txt", L, R, run_number);
 	FILE * chfile = fopen(s, "w");	// cluster size histogram
 
 
@@ -410,16 +417,17 @@ int main(int argc, char* argv[]) {
 	initializePopulation<<<BLOCKS, THREADS>>>(devStates, deviceSpin, N, q);
 	cudaMemset(deviceE, 0, R * sizeof(int));
 	deviceEnergy<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, L, N);
+	int U = -2 * N - 1;	// U is energy ceiling
 
-	while (U > -2 * N) {
+	while (U < 1) {
 		// Adjust the sweep schedule
 		// Most sweeps are performed in the region when simulation is most difficult
 		if (U < -(3 * N / 2))
 			nSteps = 2;
 		else if (U < -N / 2)
-			nSteps = 30;
+			nSteps = 2;
 		else // (U >= -N / 2)
-			nSteps = 10;
+			nSteps = 30;
 
 		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%d out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
@@ -436,7 +444,7 @@ int main(int argc, char* argv[]) {
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
-		U--;
+		U++;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
 		updateReplicas<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, deviceUpdate, N);
