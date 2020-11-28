@@ -88,10 +88,14 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(FILE * efile, int* E, int R, int U) {
+void CalcPrintAvgE(FILE * efile, FILE * e3file, int* E, int R, int U) {
 	float avg = 0.0;
-	for (int i = 0; i < R; i++)
+	fprintf(e3file, "U: %d", U);
+	for (int i = 0; i < R; i++) {
 		avg += E[i];
+		fprintf(e3file, "%d ", E[i]);
+	}
+	fprintf(e3file, "\n");
 	avg /= R;
 	fprintf(efile, "%d %f\n", U, avg);
 	printf("E: %f\n", avg);
@@ -359,6 +363,8 @@ int main(int argc, char* argv[]) {
 	FILE * efile = fopen(s, "w");	// average energy
 	sprintf(s, "datasets//heat_L%d_R%d_run%de2.txt", L, R, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
+	sprintf(s, "datasets//heat_L%d_R%d_run%de3.txt", L, R, run_number);
+	FILE * e3file = fopen(s, "w");	// all energies after relaxation
 	sprintf(s, "datasets//heat_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
 	sprintf(s, "datasets//heat_L%d_R%d_run%dpt.txt", L, R, run_number);
@@ -423,11 +429,11 @@ int main(int argc, char* argv[]) {
 		// Adjust the sweep schedule
 		// Most sweeps are performed in the region when simulation is most difficult
 		if (U < -(3 * N / 2))
-			nSteps = 2;
+			nSteps = 1;
 		else if (U < -N / 2)
-			nSteps = 2;
+			nSteps = 1;
 		else // (U >= -N / 2)
-			nSteps = 30;
+			nSteps = 1;
 
 		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%d out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
@@ -440,7 +446,7 @@ int main(int argc, char* argv[]) {
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, hostE, R, U);
+		CalcPrintAvgE(efile, e3file, hostE, R, U);
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
