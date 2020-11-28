@@ -438,7 +438,7 @@ int main(int argc, char* argv[]) {
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, hostE, R, U);
+		CalcPrintAvgE(efile, e3file, hostE, R, U);
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
