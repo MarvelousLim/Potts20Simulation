@@ -88,10 +88,14 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(FILE * efile, int* E, int R, int U) {
+void CalcPrintAvgE(FILE* efile, FILE* e3file, int* E, int R, int U) {
 	float avg = 0.0;
-	for (int i = 0; i < R; i++)
+	fprintf(e3file, "U: %d", U);
+	for (int i = 0; i < R; i++) {
 		avg += E[i];
+		fprintf(e3file, "%d ", E[i]);
+	}
+	fprintf(e3file, "\n");
 	avg /= R;
 	fprintf(efile, "%d %f\n", U, avg);
 	printf("E: %f\n", avg);
@@ -352,6 +356,8 @@ int main(int argc, char* argv[]) {
 	FILE * efile = fopen(s, "w");	// average energy
 	sprintf(s, "datasets//xorworv2_L%d_R%d_run%de2.txt", L, R, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
+	sprintf(s, "datasets//heat_L%d_R%d_run%de3.txt", L, R, run_number);
+	FILE * e3file = fopen(s, "w");	// all energies after relaxation
 	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
 	sprintf(s, "datasets//xorworv2_L%d_R%d_run%dpt.txt", L, R, run_number);
