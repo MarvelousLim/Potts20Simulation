@@ -88,17 +88,29 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(FILE * efile, FILE * e3file, int* E, int R, int U) {
+void CalcPrintAvgE(FILE * efile, int* E, int R, int U) {
 	float avg = 0.0;
-	fprintf(e3file, "U: %d", U);
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
-		fprintf(e3file, "%d ", E[i]);
 	}
-	fprintf(e3file, "\n");
 	avg /= R;
 	fprintf(efile, "%d %f\n", U, avg);
 	printf("E: %f\n", avg);
+}
+
+void PrintE(FILE * efile, int* E, int R, int U) {
+	int* array = (int*)calloc(2 * R + 1, sizeof(int));
+	fprintf(efile, "U: %d", U);
+	for (int i = 0; i < R; i++) {
+		array[-E[i]]++;
+	}
+	for (int i = 0; i < R; i++) {
+		if (array[i]) {
+			fprintf(efile, " %d %d", -i, array[i]);
+		}
+	}
+	fprintf(efile, "\n");
+	free(array);
 }
 
 __device__ int getBFSSize(char *s, int start, int replica_shift, int N, int L, bool* deviceVisited, int* deviceStack, bool colorBlindMode) {
@@ -355,6 +367,7 @@ int main(int argc, char* argv[]) {
 	int BLOCKS = atoi(argv[3]);
 	int THREADS = atoi(argv[4]);
 	int R = BLOCKS * THREADS;
+	
 
 	
 	// initializing files to write in
@@ -365,6 +378,8 @@ int main(int argc, char* argv[]) {
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
 	sprintf(s, "datasets//heat_L%d_R%d_run%de3.txt", L, R, run_number);
 	FILE * e3file = fopen(s, "w");	// all energies after relaxation
+	sprintf(s, "datasets//heat_L%d_R%d_run%de4.txt", L, R, run_number);
+	FILE * e4file = fopen(s, "w");	// all energies after cut and before relaxation
 	sprintf(s, "datasets//heat_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
 	sprintf(s, "datasets//heat_L%d_R%d_run%dpt.txt", L, R, run_number);
@@ -445,15 +460,19 @@ int main(int argc, char* argv[]) {
 			makeClusterHistogram(deviceSpin, deviceE, N, L, BLOCKS, THREADS, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
+		PrintE(e3file, hostE, R, U);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, e3file, hostE, R, U);
+		CalcPrintAvgE(efile, hostE, R, U);
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
-		U++;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
 		updateReplicas<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, deviceUpdate, N);
+
+		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
+		PrintE(e4file, hostE, R, U);
+		U++;
 	}
 	
 	// Free memory and close files
@@ -471,7 +490,7 @@ int main(int argc, char* argv[]) {
 	free(energyOrder);
 	free(hostClusterSizeArray);
 	
-	fclose(efile);
+	fclose(efile);	
 	fclose(e2file);
 	fclose(Xfile);
 	fclose(ptfile);
