@@ -6,7 +6,7 @@
 #include <curand_mtgp32_host.h>
 #include <curand_mtgp32dc_p_11213.h>
 
-#define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
+#define NNEIBORS 2 // number of nearest neighbors, is 4 for 2d lattice
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -39,35 +39,29 @@
 -------------------------------------------------------------------------------------------------------------*/
 
 struct neibors_indexes {
-	int up;
-	int down;
-	int left;
 	int right;
+	int left;
 };
 
 __device__ struct neibors_indexes SLF(int j, int L, int N) {
 	struct neibors_indexes result;
-	result.right = (j + 1) % L + L * (j / L);
-	result.left = (j - 1 + L) % L + L * (j / L); // L member is for positivity
-	result.down = (j + L) % N;
-	result.up = (j - L + N) % N; // N member is for positivity
+	result.right = j + 1;
+	result.left = j - 1; // L member is for positivity
 	return result;
 }
 
 struct neibors {
-	char up;
-	char down;
 	char left;
 	char right;
 };
 
 __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
-	struct neibors result = { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
+	struct neibors result = { s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
 	return result;
 }
 
 __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
-	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
+	return - (currentSpin == n.left) - (currentSpin == n.right);
 }
 
 __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
@@ -89,7 +83,7 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 }
 
 void CalcPrintAvgE(FILE * efile, FILE * e3file, int* E, int R, int U) {
-	float avg = 0.0;
+	double avg = 0.0;
 	fprintf(e3file, "U: %d", U);
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
@@ -115,8 +109,8 @@ __device__ int getBFSSize(char *s, int start, int replica_shift, int N, int L, b
 		currentClusterSize++;
 		//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
 		struct neibors_indexes n = SLF(currentIndex, L, N);
-		int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
-		for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
+		int possibleIndexes[NNEIBORS] = { n.left, n.right };
+		for (int indexIndex = 0; indexIndex < NNEIBORS; indexIndex++) {
 			int suggestedIndex = possibleIndexes[indexIndex];
 			if (!deviceVisited[replica_shift + suggestedIndex] && (colorBlindMode || s[replica_shift + suggestedIndex] == spinValue)) {
 				deviceStack[replica_shift + stack_index++] = suggestedIndex;
@@ -124,7 +118,6 @@ __device__ int getBFSSize(char *s, int start, int replica_shift, int N, int L, b
 			}
 		}
 	}
-
 	return currentClusterSize;
 }
 
@@ -228,7 +221,7 @@ __global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, i
 	for (int k = 0; k < N * nSteps; k++) {
 		int j = curand(&state[r]) % N;
 		char currentSpin = s[j + replica_shift];
-		char suggestedSpin = curand(&state[r]) % q;
+		char suggestedSpin = (q == 2 ? 1 - currentSpin : curand(&state[r]) % q);
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
@@ -338,7 +331,7 @@ __global__ void setup_kernel(curandState* state, int seed)
 int main(int argc, char* argv[]) {
 	// Parameters:
 	int nSteps = 1;
-	int q = 20;	// q parameter for potts model, each spin variable can take on values 0 - q-1
+	int q = 2;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 
 	/*
 	// random number generation
@@ -349,7 +342,7 @@ int main(int argc, char* argv[]) {
 	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
 	int seed = run_number;
 	//int grid_width = atoi(argv[2]);	// should not be more than 256 due to MTGP32 limits
-	int L = atoi(argv[2]);	//Lattice size.  Total number of spins is N=L^2
+	int L = atoi(argv[2]);	// Lattice size
 	int N = L * L;
 	//int R = grid_width * BLOCKS;	// Population size
 	int BLOCKS = atoi(argv[3]);
@@ -359,19 +352,19 @@ int main(int argc, char* argv[]) {
 	
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//heat_L%d_R%d_run%de.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de.txt", L, R, run_number);
 	FILE * efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//heat_L%d_R%d_run%de2.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de2.txt", L, R, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//heat_L%d_R%d_run%de3.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de3.txt", L, R, run_number);
 	FILE * e3file = fopen(s, "w");	// all energies after relaxation
-	sprintf(s, "datasets//heat_L%d_R%d_run%dX.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dX.txt", L, R, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//heat_L%d_R%d_run%dpt.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dpt.txt", L, R, run_number);
 	FILE * ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//heat_L%d_R%d_run%dn.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dn.txt", L, R, run_number);
 	FILE * nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//heat_L%d_R%d_run%dch.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dch.txt", L, R, run_number);
 	FILE * chfile = fopen(s, "w");	// cluster size histogram
 
 
