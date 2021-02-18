@@ -45,8 +45,8 @@ struct neibors_indexes {
 
 __device__ struct neibors_indexes SLF(int j, int L, int N) {
 	struct neibors_indexes result;
-	result.right = j + 1;
-	result.left = j - 1; // L member is for positivity
+	result.right = (j + 1) % N;
+	result.left = (j - 1 + N) % N; // L member is for positivity
 	return result;
 }
 
@@ -82,14 +82,11 @@ __global__ void deviceEnergy(char* s, int* E, int L, int N) {
 	E[r] = sum / 2;
 }
 
-void CalcPrintAvgE(FILE * efile, FILE * e3file, int* E, int R, int U) {
+void CalcPrintAvgE(FILE * efile, int* E, int R, int U) {
 	double avg = 0.0;
-	fprintf(e3file, "U: %d", U);
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
-		fprintf(e3file, "%d ", E[i]);
 	}
-	fprintf(e3file, "\n");
 	avg /= R;
 	fprintf(efile, "%d %f\n", U, avg);
 	printf("E: %f\n", avg);
@@ -207,30 +204,32 @@ __global__ void initializePopulation(curandState* state, char* s, int N, int q) 
 	for (int k = 0; k < N; k++) {
 		int arrayIndex = r * N + k;
 		//char spin = curand(&state[r]) % q;
-		s[arrayIndex] = 0;// spin;
+		s[arrayIndex] = (k == 0 || k == 2? 1: 0);
 	}
 }
 
-__global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, int q, int nSteps, int U) {
+__global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
 	---------------------------------------------------------------------------------------------*/
+
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 	for (int k = 0; k < N * nSteps; k++) {
-		int j = curand(&state[r]) % N;
+		int j = curand(&state[blockIdx.x]) % N;
 		char currentSpin = s[j + replica_shift];
 		char suggestedSpin = (q == 2 ? 1 - currentSpin : curand(&state[r]) % q);
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
-		if (E[r] + dE > U) {
+		if (E[r] + dE < U) {
 			E[r] = E[r] + dE;
 			s[j + replica_shift] = suggestedSpin;
 		}
 	}
 }
+
 
 void Swap(int* A, int i, int j) {
 	int temp = A[i];
@@ -265,22 +264,13 @@ void quicksort(int* E, int* O, int left, int right, int cool) {
 	}
 }
 
-
 void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FILE * e2file, FILE * Xfile) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
-	quicksort(E, O, 0, R - 1, -1); //Sorts O by energy, cold = -1 means sort for heating
-
-	/*
-	printf("E: ");
-	for (int i = 0; i < R; i++) {
-		printf("%d ", E[O[i]]);
-	}
-	printf("\n");
-	*/
+	quicksort(E, O, 0, R - 1, 1); //Sorts O by energy
 
 	int nCull = 0;
 	fprintf(e2file, "%d %d\n", U, E[O[0]]);
-	while (E[O[nCull]] == U + 1) {
+	while (E[O[nCull]] == U - 1) {
 		nCull++;
 		if (nCull == R) {
 			break;
@@ -289,7 +279,7 @@ void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FIL
 	// culling fraction
 	double X = nCull;
 	X /= R;
-	fprintf(Xfile, "%d %f\n", U, X);
+	fprintf(Xfile, "%d %f\n", U - 1, X);
 	printf("Culling fraction:\t%f\n", X);
 	for (int i = 0; i < R; i++)
 		update[i] = i;
@@ -330,7 +320,6 @@ __global__ void setup_kernel(curandState* state, int seed)
 
 int main(int argc, char* argv[]) {
 	// Parameters:
-	int nSteps = 1;
 	int q = 2;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 
 	/*
@@ -347,24 +336,23 @@ int main(int argc, char* argv[]) {
 	//int R = grid_width * BLOCKS;	// Population size
 	int BLOCKS = atoi(argv[3]);
 	int THREADS = atoi(argv[4]);
+	int nSteps = atoi(argv[5]);
 	int R = BLOCKS * THREADS;
 
-	
+
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%de.txt", N, R, nSteps, run_number);
 	FILE * efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de2.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%de2.txt", N, R, nSteps, run_number);
 	FILE * e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%de3.txt", L, R, run_number);
-	FILE * e3file = fopen(s, "w");	// all energies after relaxation
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dX.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dX.txt", N, R, nSteps, run_number);
 	FILE * Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dpt.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dpt.txt", N, R, nSteps, run_number);
 	FILE * ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dn.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dn.txt", N, R, nSteps, run_number);
 	FILE * nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//1DIsing_L%d_R%d_run%dch.txt", L, R, run_number);
+	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dch.txt", N, R, nSteps, run_number);
 	FILE * chfile = fopen(s, "w");	// cluster size histogram
 
 
@@ -416,34 +404,29 @@ int main(int argc, char* argv[]) {
 	initializePopulation<<<BLOCKS, THREADS>>>(devStates, deviceSpin, N, q);
 	cudaMemset(deviceE, 0, R * sizeof(int));
 	deviceEnergy<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, L, N);
-	int U = -2 * N - 1;	// U is energy ceiling
 
-	while (U < 1) {
+	int U = 0;	// U is energy ceiling
+	
+	while (U >= - N) {
 		// Adjust the sweep schedule
 		// Most sweeps are performed in the region when simulation is most difficult
-		if (U < -(3 * N / 2))
-			nSteps = 1;
-		else if (U < -N / 2)
-			nSteps = 1;
-		else // (U >= -N / 2)
-			nSteps = 1;
-
+	
 		fprintf(nfile, "%d %d\n", U, nSteps);
-		printf("U:\t%d out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
+		printf("U:\t%d out of %d; nSteps: %d;\n", U, - N, nSteps);
 		// Perform monte carlo sweeps on gpu
-		equilibrate<<<BLOCKS, THREADS>>>(devStates, deviceSpin, deviceE, L, N, q, nSteps, U);
+		equilibrate<<<BLOCKS, THREADS>>>(devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U);
 
 		// Create disordered cluster size histogram in particular energy range
-		if (U <= -1.5 * N)
-			makeClusterHistogram(deviceSpin, deviceE, N, L, BLOCKS, THREADS, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
+		//if (U <= -1.5 * N)
+		//	makeClusterHistogram(deviceSpin, deviceE, N, L, BLOCKS, THREADS, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
 
 		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
 		// record average energy and rho t
-		CalcPrintAvgE(efile, e3file, hostE, R, U);
+		CalcPrintAvgE(efile, hostE, R, U);
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
-		U++;
+		U--;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
 		updateReplicas<<<BLOCKS, THREADS>>>(deviceSpin, deviceE, deviceUpdate, N);
