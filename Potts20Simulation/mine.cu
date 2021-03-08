@@ -3,8 +3,6 @@
 
 #include <cuda.h>
 #include <curand_kernel.h>
-#include <curand_mtgp32_host.h>
-#include <curand_mtgp32dc_p_11213.h>
 
 #define NNEIBORS 2 // number of nearest neighbors, is 4 for 2d lattice
 
@@ -196,19 +194,19 @@ void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, int U) {
 	free(famHist);
 }
 
-__global__ void initializePopulation(curandState* state, char* s, int N, int q) {
+__global__ void initializePopulation(curandStatePhilox4_32_10_t* state, char* s, int N, int q) {
 	/*---------------------------------------------------------------------------------------------
 		Initializes population on gpu(!) by randomly assigning each spin a value from 0 to q-1
 	----------------------------------------------------------------------------------------------*/
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	for (int k = 0; k < N; k++) {
 		int arrayIndex = r * N + k;
-		//char spin = curand(&state[r]) % q;
-		s[arrayIndex] = (k == 0 || k == 2 ? 1 : 0);
+		char spin = curand(&state[r]) % q;
+		s[arrayIndex] = spin;
 	}
 }
 
-__global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U) {
+__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
@@ -219,7 +217,7 @@ __global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, i
 	for (int k = 0; k < N * nSteps; k++) {
 		int j = curand(&state[blockIdx.x]) % N;
 		char currentSpin = s[j + replica_shift];
-		char suggestedSpin = (q == 2 ? 1 - currentSpin : curand(&state[r]) % q);
+		char suggestedSpin = curand(&state[r]) % q;
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
@@ -229,7 +227,6 @@ __global__ void equilibrate(curandState* state, char* s, int* E, int L, int N, i
 		}
 	}
 }
-
 
 void Swap(int* A, int i, int j) {
 	int temp = A[i];
@@ -311,23 +308,17 @@ __global__ void updateReplicas(char* s, int* E, int* update, int N) {
 	}
 }
 
-__global__ void setup_kernel(curandState* state, int seed)
+__global__ void setup_kernel(curandStatePhilox4_32_10_t* state, int seed)
 {
 	int id = threadIdx.x + blockIdx.x * blockDim.x;
 	/* Each thread gets same seed, a different sequence
 	   number, no offset */
-	curand_init(seed, id, 1, &state[id]);
+	curand_init(seed, id, 0, state + id);
 }
 
 int main(int argc, char* argv[]) {
 	// Parameters:
 	int q = 2;	// q parameter for potts model, each spin variable can take on values 0 - q-1
-
-	/*
-	// random number generation
-	curandStateMtgp32* devMTGPStates;
-	mtgp32_kernel_params* devKernelParams;
-	*/
 
 	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
 	int seed = run_number;
@@ -339,7 +330,6 @@ int main(int argc, char* argv[]) {
 	int THREADS = atoi(argv[4]);
 	int nSteps = atoi(argv[5]);
 	int R = BLOCKS * THREADS;
-
 
 	// initializing files to write in
 	char s[100];
@@ -386,14 +376,6 @@ int main(int argc, char* argv[]) {
 	cudaMalloc((void**)&deviceClusterSizeArray, N * sizeof(int));
 	cudaMalloc((void**)&deviceStack, N * R * sizeof(int));
 
-	/*
-	// Init MTGP32
-	cudaMalloc((void**)&devMTGPStates, BLOCKS * sizeof(curandStateMtgp32));
-	cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params));
-	curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams);
-	curandMakeMTGP32KernelState(devMTGPStates, mtgp32dc_params_fast_11213, devKernelParams, BLOCKS, seed);
-	*/
-
 	// Init Philox
 	curandStatePhilox4_32_10_t* devStates;
 	cudaMalloc((void**)&devStates, R * sizeof(curandState));
@@ -404,15 +386,12 @@ int main(int argc, char* argv[]) {
 
 	// Actually working part
 	initializePopulation <<<BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
-	cudaMemset(deviceE, 0, R * sizeof(int));
+	//cudaMemset(deviceE, 0, R * sizeof(int));
 	deviceEnergy <<<BLOCKS, THREADS >>> (deviceSpin, deviceE, L, N);
 
 	int U = 0;	// U is energy ceiling
 
 	while (U >= -N) {
-		// Adjust the sweep schedule
-		// Most sweeps are performed in the region when simulation is most difficult
-
 		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%d out of %d; nSteps: %d;\n", U, -N, nSteps);
 		// Perform monte carlo sweeps on gpu
@@ -431,7 +410,7 @@ int main(int argc, char* argv[]) {
 		U--;
 		// copy list of replicas to update back to gpu
 		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
-		updateReplicas << <BLOCKS, THREADS >> > (deviceSpin, deviceE, deviceUpdate, N);
+		updateReplicas <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, deviceUpdate, N);
 	}
 
 	// Free memory and close files
