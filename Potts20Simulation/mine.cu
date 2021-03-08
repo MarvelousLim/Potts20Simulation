@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <curand_kernel.h>
 
-#define NNEIBORS 2 // number of nearest neighbors, is 4 for 2d lattice
+#define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -37,29 +37,34 @@
 -------------------------------------------------------------------------------------------------------------*/
 
 struct neibors_indexes {
-	int right;
+	int up;
+	int down;
 	int left;
+	int right;
 };
 
-__device__ struct neibors_indexes SLF(int j, int L, int N) {
+__host__ __device__ struct neibors_indexes SLF(int j, int L, int N) {
 	struct neibors_indexes result;
-	result.right = (j + 1) % N;
-	result.left = (j - 1 + N) % N; // L member is for positivity
+	result.right = (j + 1) % L + L * (j / L);
+	result.left = (j - 1 + L) % L + L * (j / L); // L member is for positivity
+	result.down = (j + L) % N;
+	result.up = (j - L + N) % N; // N member is for positivity
 	return result;
 }
 
 struct neibors {
+	char up;
+	char down;
 	char left;
 	char right;
 };
 
-__device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
-	struct neibors result = { s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
-	return result;
+__host__ __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
+	return { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
 }
 
-__device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
-	return -(currentSpin == n.left) - (currentSpin == n.right);
+__host__ __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
+	return - (currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
 }
 
 __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
@@ -104,8 +109,8 @@ __device__ int getBFSSize(char* s, int start, int replica_shift, int N, int L, b
 		currentClusterSize++;
 		//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
 		struct neibors_indexes n = SLF(currentIndex, L, N);
-		int possibleIndexes[NNEIBORS] = { n.left, n.right };
-		for (int indexIndex = 0; indexIndex < NNEIBORS; indexIndex++) {
+		int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
+		for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
 			int suggestedIndex = possibleIndexes[indexIndex];
 			if (!deviceVisited[replica_shift + suggestedIndex] && (colorBlindMode || s[replica_shift + suggestedIndex] == spinValue)) {
 				deviceStack[replica_shift + stack_index++] = suggestedIndex;
@@ -113,13 +118,14 @@ __device__ int getBFSSize(char* s, int start, int replica_shift, int N, int L, b
 			}
 		}
 	}
+
 	return currentClusterSize;
 }
 
 __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
-	if (E[r] == U + 1) {
+	if (E[r] == U - 1) {
 		int argmax = 0;
 		int max = 0;
 		// Go sequentially through lattice and assign spins to clusters for first time
@@ -284,7 +290,7 @@ void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FIL
 	if (nCull < R) {
 		for (int i = 0; i < nCull; i++) {
 			// random selection of unculled replica
-			int r = (rand() % (R - nCull)) + nCull; // different random number generator for
+			int r = (rand() % (R - nCull)) + nCull; // different random number generator for resampling
 			update[O[i]] = O[r];
 			replicaFamily[O[i]] = replicaFamily[O[r]];
 		}
@@ -333,17 +339,17 @@ int main(int argc, char* argv[]) {
 
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%de.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%de.txt", N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%de2.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%de2.txt", N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dX.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dX.txt", N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dpt.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dpt.txt", N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dn.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dn.txt", N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//1DIsing_N%d_R%d_nSteps%d_run%dch.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dch.txt", N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
 
 
@@ -391,9 +397,9 @@ int main(int argc, char* argv[]) {
 
 	int U = 0;	// U is energy ceiling
 
-	while (U >= -N) {
+	while (U >= - 2 * N) {
 		fprintf(nfile, "%d %d\n", U, nSteps);
-		printf("U:\t%d out of %d; nSteps: %d;\n", U, -N, nSteps);
+		printf("U:\t%d out of %d; nSteps: %d;\n", U, - 2 * N, nSteps);
 		// Perform monte carlo sweeps on gpu
 		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U);
 
