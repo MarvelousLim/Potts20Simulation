@@ -384,7 +384,7 @@ int main(int argc, char* argv[]) {
 
 	// Init Philox
 	curandStatePhilox4_32_10_t* devStates;
-	cudaMalloc((void**)&devStates, R * sizeof(curandState));
+	cudaMalloc((void**)&devStates, R * sizeof(curandStatePhilox4_32_10_t));
 	setup_kernel <<< BLOCKS, THREADS >>> (devStates, seed);
 
 	// Init std random generator for little host part
