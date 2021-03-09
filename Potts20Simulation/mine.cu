@@ -221,7 +221,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, 
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 	for (int k = 0; k < N * nSteps; k++) {
-		int j = curand(&state[blockIdx.x]) % N;
+		int j = curand(&state[r]) % N;
 		char currentSpin = s[j + replica_shift];
 		char suggestedSpin = curand(&state[r]) % q;
 		struct neibors_indexes n_i = SLF(j, L, N);
