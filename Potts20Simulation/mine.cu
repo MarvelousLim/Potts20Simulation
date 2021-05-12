@@ -64,7 +64,7 @@ __host__ __device__ struct neibors get_neibors_values(char* s, struct neibors_in
 }
 
 __host__ __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
-	return - (currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
+	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
 }
 
 __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
@@ -169,7 +169,7 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int BLOCKS, int THREADS
 	cudaMemset(deviceVisited, 0, N * BLOCKS * THREADS * sizeof(bool));
 	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(unsigned int));
 
-	cudaReplicaBFS << <BLOCKS, THREADS >> > (s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaReplicaBFS << < BLOCKS, THREADS >> > (s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
 	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, N * sizeof(int), cudaMemcpyDeviceToHost);
 
 	fprintf(chfile, "%d ", U);
@@ -322,9 +322,11 @@ __global__ void setup_kernel(curandStatePhilox4_32_10_t* state, int seed)
 	curand_init(seed, id, 0, state + id);
 }
 
+
+
 int main(int argc, char* argv[]) {
 	// Parameters:
-	int q = 2;	// q parameter for potts model, each spin variable can take on values 0 - q-1
+	int q = 4;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 
 	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
 	int seed = run_number;
@@ -339,17 +341,17 @@ int main(int argc, char* argv[]) {
 
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%de.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%de.txt", q, N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%de2.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%de2.txt", q, N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dX.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dX.txt", q, N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dpt.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dpt.txt", q, N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dn.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dn.txt", q, N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//2DIsing_N%d_R%d_nSteps%d_run%dch.txt", N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dch.txt", q, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
 
 
@@ -391,9 +393,9 @@ int main(int argc, char* argv[]) {
 	srand(seed);
 
 	// Actually working part
-	initializePopulation <<<BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
+	initializePopulation <<< BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
 	//cudaMemset(deviceE, 0, R * sizeof(int));
-	deviceEnergy <<<BLOCKS, THREADS >>> (deviceSpin, deviceE, L, N);
+	deviceEnergy <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, L, N);
 
 	int U = 0;	// U is energy ceiling
 
