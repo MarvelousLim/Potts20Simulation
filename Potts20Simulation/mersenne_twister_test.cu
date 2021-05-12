@@ -9,7 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-//#include <mt19937.h>
+#include "mt19937.h"
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
 #define BLOCKS 64 //64
@@ -26,7 +26,7 @@ __global__	int del(T i, T a, T b, T c, T d, T e) {
 __global__ void initLattice(curandStateMtgp32* state, LatticeType* devR, int N)
 {
 	int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	float r;
+//	float r;
 	if (tid < NGENERATORS)
 	{
 		for (int i = tid; i < N; i += NGENERATORS)

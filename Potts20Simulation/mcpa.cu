@@ -168,22 +168,22 @@ return sum;
 }
 
 // Initializes spin lookup table for efficiency
-void initializeSLT(int* SLT,int N,int L){
+void initializeSLT(int* SLT, int N, int L) {
     int next0;
     int next1;
     int next2;
     int next3;
-    int d=4;
-    for(int i=0;i<N;i++){
-        next0=(i+1)%L+L*(i/L);
-        next1=(i+L-1)%L+L*(i/L);
-        next2=(i+L)%(L*L)+(L*L)*(i/(L*L));
-        next3=(i+(L*L)-L)%(L*L)+(L*L)*(i/(L*L));
-        SLT[d*i]=next0;
-        SLT[d*i+1]=next1;
-        SLT[d*i+2]=next2;
-        SLT[d*i+3]=next3;
-      }
+    int d = 4;
+    for (int i = 0; i < N; i++) {
+        next0 = (i + 1) % L + L * (i / L);
+        next1 = (i + L - 1) % L + L * (i / L);
+        next2 = (i + L) % (L * L) + (L * L) * (i / (L * L));
+        next3 = (i + (L * L) - L) % (L * L) + (L * L) * (i / (L * L));
+        SLT[d * i] = next0;
+        SLT[d * i + 1] = next1;
+        SLT[d * i + 2] = next2;
+        SLT[d * i + 3] = next3;
+    }
 }
 
 // initializes random number generator on gpu
@@ -445,16 +445,16 @@ void makeClusterHistogram(char* s, int* SLT, int* E, int q, int N, int L, int R,
                     V1[i]=1;
                 }
             }
-            for(int i=0;i<N;i++){
-                if(s[RN+R*i]==arg_M && !V1[i]){
-                    int clusterSize=BFS(SLT,V1, V2, i);
-                    for(int j=0;j<N;j++){
-                        V1[j]+=V2[j];
-                        V2[j]=0;
+            for (int i = 0; i < N; i++) {
+                if (s[RN + R * i] == arg_M && !V1[i]) {
+                    int clusterSize = BFS(SLT, V1, V2, i);
+                    for (int j = 0; j < N; j++) {
+                        V1[j] += V2[j];
+                        V2[j] = 0;
                     }
-                    if(clusterSize>maxBaseCluster){
-                        maxBaseCluster=clusterSize;
-                        arg_base=i;
+                    if (clusterSize > maxBaseCluster) {
+                        maxBaseCluster = clusterSize;
+                        arg_base = i;
                     }
                 }
             }
@@ -550,7 +550,7 @@ int main(int argc, char *argv[]){
     curandState_t* states;
     cudaMalloc((void**)&states,2*R*sizeof(curandState_t));
     // setup gpu random number generator
-    randomSetup<<<2*grid_width, block_width>>>(run_number*77, states,R);
+    randomSetup<<<2*grid_width, block_width>>>(run_number*, states,R);
     // copy arrays to device
     cudaMemcpy(d_SLT,h_SLT,N*nneighbs*sizeof(int),cudaMemcpyHostToDevice);
     cudaMemcpy(d_s,h_s,RNsize,cudaMemcpyHostToDevice);
