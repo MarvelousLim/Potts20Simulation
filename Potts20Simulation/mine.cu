@@ -39,14 +39,20 @@
 struct neibors_indexes {
 	int up;
 	int down;
+	int side;
+	/*
 	int left;
 	int right;
+	*/
 };
 
 __host__ __device__ struct neibors_indexes SLF(int j, int L, int N) {
 	struct neibors_indexes result;
-	result.right = (j + 1) % L + L * (j / L);
-	result.left = (j - 1 + L) % L + L * (j / L); // L member is for positivity
+	int column = j / L;
+	int row = j % L;
+	int right = (j + 1) % L + L * column;
+	int left = (j - 1 + L) % L + L * column; // L member is for positivity
+	result.side = ((row + column) % 2 == 0? right : left);
 	result.down = (j + L) % N;
 	result.up = (j - L + N) % N; // N member is for positivity
 	return result;
@@ -55,16 +61,19 @@ __host__ __device__ struct neibors_indexes SLF(int j, int L, int N) {
 struct neibors {
 	char up;
 	char down;
+	char side;
+	/*
 	char left;
 	char right;
+	*/
 };
 
 __host__ __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i, int replica_shift) {
-	return { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.left + replica_shift], s[n_i.right + replica_shift] };
+	return { s[n_i.up + replica_shift], s[n_i.down + replica_shift], s[n_i.side + replica_shift] };
 }
 
 __host__ __device__ int LocalE(char currentSpin, struct neibors n) { 	// Computes energy of spin i with neighbors a, b, c, d 
-	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.left) - (currentSpin == n.right);
+	return -(currentSpin == n.up) - (currentSpin == n.down) - (currentSpin == n.side);
 }
 
 __device__ int DeltaE(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
@@ -109,8 +118,8 @@ __device__ int getBFSSize(char* s, int start, int replica_shift, int N, int L, b
 		currentClusterSize++;
 		//printf("stack is %d, currentIndex %d, currentClusterSize %d\n", stack_index, currentIndex, currentClusterSize);
 		struct neibors_indexes n = SLF(currentIndex, L, N);
-		int possibleIndexes[4] = { n.up, n.down, n.left, n.right };
-		for (int indexIndex = 0; indexIndex < 4; indexIndex++) {
+		int possibleIndexes[3] = { n.up, n.down, n.side };
+		for (int indexIndex = 0; indexIndex < 3; indexIndex++) {
 			int suggestedIndex = possibleIndexes[indexIndex];
 			if (!deviceVisited[replica_shift + suggestedIndex] && (colorBlindMode || s[replica_shift + suggestedIndex] == spinValue)) {
 				deviceStack[replica_shift + stack_index++] = suggestedIndex;
