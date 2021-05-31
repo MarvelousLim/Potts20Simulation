@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <curand_kernel.h>
 
-#define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
+//#define NNEIBORS 3 // number of nearest neighbors, is 4 for 2d lattice
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -35,6 +35,16 @@
 		Also, when its about generation random numbers, we use R threads, one for each replica
 
 -------------------------------------------------------------------------------------------------------------*/
+
+#define cudaCheckError(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true)
+{
+	if (code != cudaSuccess)
+	{
+		fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
 
 struct neibors_indexes {
 	int up;
@@ -98,6 +108,7 @@ void CalcPrintAvgE(FILE* efile, int* E, int R, int U) {
 	double avg = 0.0;
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
+		//fprintf(efile, "%d ", E[i]);
 	}
 	avg /= R;
 	fprintf(efile, "%d %f\n", U, avg);
@@ -134,7 +145,7 @@ __device__ int getBFSSize(char* s, int start, int replica_shift, int N, int L, b
 __global__ void cudaReplicaBFS(char* s, int* E, int N, int L, int U, bool* deviceVisited, int* deviceClusterSizeArray, int* deviceStack) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
-	if (E[r] == U - 1) {
+	if (E[r] == U + 1) {
 		int argmax = 0;
 		int max = 0;
 		// Go sequentially through lattice and assign spins to clusters for first time
@@ -178,7 +189,8 @@ void makeClusterHistogram(char* s, int* E, int N, int L, int BLOCKS, int THREADS
 	cudaMemset(deviceVisited, 0, N * BLOCKS * THREADS * sizeof(bool));
 	cudaMemset(deviceClusterSizeArray, 0, N * sizeof(unsigned int));
 
-	cudaReplicaBFS << < BLOCKS, THREADS >> > (s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaReplicaBFS <<< BLOCKS, THREADS >>> (s, E, N, L, U, deviceVisited, deviceClusterSizeArray, deviceStack);
+	cudaCheckError(cudaPeekAtLastError());
 	cudaMemcpy(hostClusterSizeArray, deviceClusterSizeArray, N * sizeof(int), cudaMemcpyDeviceToHost);
 
 	fprintf(chfile, "%d ", U);
@@ -221,7 +233,7 @@ __global__ void initializePopulation(curandStatePhilox4_32_10_t* state, char* s,
 	}
 }
 
-__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U) {
+__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U, int* number_of_flips) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
@@ -236,9 +248,10 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, 
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
 		int dE = DeltaE(currentSpin, suggestedSpin, n);
-		if (E[r] + dE < U) {
+		if (E[r] + dE > U) {
 			E[r] = E[r] + dE;
 			s[j + replica_shift] = suggestedSpin;
+			atomicAdd(number_of_flips, 1);
 		}
 	}
 }
@@ -279,11 +292,11 @@ void quicksort(int* E, int* O, int left, int right, int cool) {
 
 void resample(int* E, int* O, int* update, int* replicaFamily, int R, int U, FILE* e2file, FILE* Xfile) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
-	quicksort(E, O, 0, R - 1, 1); //Sorts O by energy
+	quicksort(E, O, 0, R - 1, -1); //Sorts O by energy
 
 	int nCull = 0;
 	fprintf(e2file, "%d %d\n", U, E[O[0]]);
-	while (E[O[nCull]] == U - 1) {
+	while (E[O[nCull]] == U + 1) {
 		nCull++;
 		if (nCull == R) {
 			break;
@@ -331,9 +344,8 @@ __global__ void setup_kernel(curandStatePhilox4_32_10_t* state, int seed)
 	curand_init(seed, id, 0, state + id);
 }
 
-
-
 int main(int argc, char* argv[]) {
+	
 	// Parameters:
 	int q = 4;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 
@@ -347,26 +359,29 @@ int main(int argc, char* argv[]) {
 	int THREADS = atoi(argv[4]);
 	int nSteps = atoi(argv[5]);
 	int R = BLOCKS * THREADS;
-
+	
 	// initializing files to write in
 	char s[100];
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%de.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%de.txt", q, N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%de2.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%de2.txt", q, N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dX.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%dX.txt", q, N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dpt.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%dpt.txt", q, N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dn.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%dn.txt", q, N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//2DHexPotts_q%d_N%d_R%d_nSteps%d_run%dch.txt", q, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%dch.txt", q, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
-
+	//sprintf(s, "datasets//test.txt");
+	//FILE* test = fopen(s, "w");	// test data
 
 	size_t fullLatticeByteSize = R * N * sizeof(char);
 
 	// Allocate space on host 
+	int host_number_of_flips;
+	//char* hostSpin = (char*)malloc(N * sizeof(char));
 	int* hostE = (int*)malloc(R * sizeof(int));
 	int* hostUpdate = (int*)malloc(R * sizeof(int));
 	int* replicaFamily = (int*)malloc(R * sizeof(int));
@@ -375,61 +390,84 @@ int main(int argc, char* argv[]) {
 		energyOrder[i] = i;
 		replicaFamily[i] = i;
 	}
-
+	
 	// Allocate memory on device
+	int* device_number_of_flips;
 	char* deviceSpin; // s, d_s
 	int* deviceE;
 	int* deviceUpdate;
-	cudaMalloc((void**)&deviceSpin, fullLatticeByteSize);
-	cudaMalloc((void**)&deviceE, R * sizeof(int));
-	cudaMalloc((void**)&deviceUpdate, R * sizeof(int));
+	cudaCheckError( cudaMalloc((void**)&device_number_of_flips, sizeof(int)) );
+	cudaCheckError( cudaMalloc((void**)&deviceSpin, fullLatticeByteSize) );
+	cudaCheckError( cudaMalloc((void**)&deviceE, R * sizeof(int)) );
+	cudaCheckError( cudaMalloc((void**)&deviceUpdate, R * sizeof(int)) );
 
 	// Allocate memory for histogram calculation
 	int* hostClusterSizeArray = (int*)malloc(N * sizeof(int));
 	bool* deviceVisited;
 	int* deviceClusterSizeArray;
 	int* deviceStack;
-	cudaMalloc((void**)&deviceVisited, N * R * sizeof(bool));
-	cudaMalloc((void**)&deviceClusterSizeArray, N * sizeof(int));
-	cudaMalloc((void**)&deviceStack, N * R * sizeof(int));
+	cudaCheckError( cudaMalloc((void**)&deviceVisited, N * R * sizeof(bool)) );
+	cudaCheckError( cudaMalloc((void**)&deviceClusterSizeArray, N * sizeof(int)) );
+	cudaCheckError( cudaMalloc((void**)&deviceStack, N * R * sizeof(int)) );
 
 	// Init Philox
 	curandStatePhilox4_32_10_t* devStates;
-	cudaMalloc((void**)&devStates, R * sizeof(curandStatePhilox4_32_10_t));
+	cudaCheckError( cudaMalloc((void**)&devStates, R * sizeof(curandStatePhilox4_32_10_t)) );
 	setup_kernel <<< BLOCKS, THREADS >>> (devStates, seed);
+	cudaCheckError(cudaPeekAtLastError());
 
 	// Init std random generator for little host part
 	srand(seed);
 
 	// Actually working part
 	initializePopulation <<< BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
+	cudaCheckError(cudaPeekAtLastError());
 	//cudaMemset(deviceE, 0, R * sizeof(int));
 	deviceEnergy <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, L, N);
-
-	int U = 0;	// U is energy ceiling
-
-	while (U >= - 2 * N) {
+	cudaCheckError(cudaPeekAtLastError());
+	
+	
+	int U = -3 * N / 2;	// U is energy ceiling / floor
+	
+	while (U <= 1) {
 		fprintf(nfile, "%d %d\n", U, nSteps);
-		printf("U:\t%d out of %d; nSteps: %d;\n", U, - 2 * N, nSteps);
+		printf("U:\t%d out of %d; nSteps: %d;\n", U, - 3 * N / 2, nSteps);
 		// Perform monte carlo sweeps on gpu
-		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U);
+		cudaMemset(device_number_of_flips, 0, sizeof(int));
+
+		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, device_number_of_flips);
+		cudaCheckError(cudaPeekAtLastError());
+
+		cudaCheckError( cudaMemcpy(&host_number_of_flips, device_number_of_flips, sizeof(int), cudaMemcpyDeviceToHost) );
+		printf("flips: %d; acceptance_ratio: %lf\n", host_number_of_flips, (float)host_number_of_flips / N / nSteps / R);
 
 		// Create disordered cluster size histogram in particular energy range
 		//if (U <= -1.5 * N)
 		//	makeClusterHistogram(deviceSpin, deviceE, N, L, BLOCKS, THREADS, U, chfile, deviceVisited, deviceClusterSizeArray, deviceStack, hostClusterSizeArray);
 
-		cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost);
+		cudaCheckError( cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost) );
+		//cudaCheckError( cudaMemcpy(hostSpin, deviceSpin, N * sizeof(char), cudaMemcpyDeviceToHost) );
+		
+		//fprintf(test, "%d %d ", U, hostE[0]);
+		//for (int i = 0; i < N; i++) {
+		//	fprintf(test, "%d %d ", i, hostSpin[i]);
+		//}
+		//fprintf(test, "\n");
+		
+
 		// record average energy and rho t
 		CalcPrintAvgE(efile, hostE, R, U);
 		CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		resample(hostE, energyOrder, hostUpdate, replicaFamily, R, U, e2file, Xfile);
-		U--;
+		U++;
 		// copy list of replicas to update back to gpu
-		cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice);
+		cudaCheckError( cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice) );
 		updateReplicas <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, deviceUpdate, N);
+		cudaCheckError(cudaPeekAtLastError());
 	}
-
+	
+	
 	// Free memory and close files
 	cudaFree(devStates);
 	cudaFree(deviceSpin);
@@ -438,13 +476,17 @@ int main(int argc, char* argv[]) {
 	cudaFree(deviceClusterSizeArray);
 	cudaFree(deviceStack);
 	cudaFree(deviceVisited);
-
+	
+	
+	//free(hostSpin);
+	//free(deviceSpin);
 	free(hostE);
 	free(hostUpdate);
 	free(replicaFamily);
 	free(energyOrder);
 	free(hostClusterSizeArray);
-
+	
+	
 	fclose(efile);
 	fclose(e2file);
 	fclose(Xfile);
@@ -452,6 +494,8 @@ int main(int argc, char* argv[]) {
 	fclose(nfile);
 	fclose(chfile);
 
+	//fclose(test);
+	
 	// End
 	return 0;
 }
