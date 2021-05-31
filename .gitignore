@@ -5,15 +5,17 @@
 
 # Mine
 Potts20Simulation/datasets/*
+Potts20Simulation/marina_datasets/*
 Potts20Simulation/x64
 Potts20Simulation/*.exe
+Potts20Simulation/*.ipynb
 Potts20Simulation/*.exp
 Potts20Simulation/*.lib
 Potts20Simulation/*vcx*
 x64
 
 
-# User-specific files
+# User-specific filesw
 *.rsuser
 *.suo
 *.user
