@@ -13,7 +13,7 @@ Potts20Simulation/*.txt
 Potts20Simulation/*.lib
 Potts20Simulation/*vcx*
 x64
-
+*.ipynb
 
 # User-specific filesw
 *.rsuser
