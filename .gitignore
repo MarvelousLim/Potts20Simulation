@@ -348,3 +348,6 @@ ASALocalRun/
 
 # BeatPulse healthcheck temp database
 healthchecksdb
+/Potts20Simulation/marina_datasets/L12_honey.csv
+/Potts20Simulation/1DIsingTMES.ipynb
+/Potts20Simulation/.ipynb_checkpoints/1DIsingTMES-checkpoint.ipynb
