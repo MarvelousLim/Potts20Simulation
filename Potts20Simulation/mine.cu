@@ -347,7 +347,6 @@ __global__ void setup_kernel(curandStatePhilox4_32_10_t* state, int seed)
 int main(int argc, char* argv[]) {
 	
 	// Parameters:
-	int q = 4;	// q parameter for potts model, each spin variable can take on values 0 - q-1
 
 	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
 	int seed = run_number;
@@ -359,7 +358,9 @@ int main(int argc, char* argv[]) {
 	int THREADS = atoi(argv[4]);
 	int nSteps = atoi(argv[5]);
 	int R = BLOCKS * THREADS;
-	
+
+	int q = atoi(argv[6]);	// q parameter for potts model, each spin variable can take on values 0 - q-1
+
 	// initializing files to write in
 	char s[100];
 	sprintf(s, "datasets//2DHexPottsHeating_q%d_N%d_R%d_nSteps%d_run%de.txt", q, N, R, nSteps, run_number);
