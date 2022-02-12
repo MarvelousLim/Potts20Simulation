@@ -96,7 +96,7 @@ __device__ struct neibors get_neibors_values(char* s, struct neibors_indexes n_i
 
 __host__ __device__ struct energy_parts localEnergyParts(char currentSpin, struct neibors n) {
 	// Computes energy of spin i with neighbors a, b, c, d 
-	// 2 * D due to following halfening
+	// it summirezes each join 2 times
 	return {
 		- (currentSpin * n.up)
 		- (currentSpin * n.right)
@@ -144,11 +144,12 @@ __global__ void deviceEnergy(char* s, float* E, int L, int N, float D) {
 	E[r] = calcEnergyFromParts(sum, D); 
 }
 
-// hardcoded spin suggestion
+// hardcoded spin suggestion for init
 __device__ char suggestSpin(curandStatePhilox4_32_10_t* state, int r) {
 	return curand(&state[r]) % 3 - 1;
 }
 
+// hardcoded spin suggestion for equilibration
 __device__ char suggestSpinSwap(curandStatePhilox4_32_10_t* state, int r, char currentSpin) {
 	return (currentSpin + 2 + (curand(&state[r]) % 2)) % 3 - 1; // little trick
 }
@@ -159,9 +160,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 		population;
 		There, one could change calcEnergyParts for system of carrying arrays of energy parts,
 		but:
-			1. This is not the bottleneck (which is for loop over N * nSteps (could be halved?))
-			2. ...
-			3. Lazy to assign memmory for it
+			1. This is not the bottleneck (which is for loop over N * nSteps
 	---------------------------------------------------------------------------------------------*/
 
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
@@ -217,7 +216,7 @@ void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, float U) {
 
 __global__ void initializePopulation(curandStatePhilox4_32_10_t* state, char* s, int N, int q) {
 	/*---------------------------------------------------------------------------------------------
-		Initializes population on gpu(!) by randomly assigning each spin a value from 0 to q-1
+		Initializes population on gpu(!) by randomly assigning each spin a value from suggestSpin function
 	----------------------------------------------------------------------------------------------*/
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	for (int k = 0; k < N; k++) {
