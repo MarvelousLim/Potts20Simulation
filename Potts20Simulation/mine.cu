@@ -114,12 +114,6 @@ __device__ struct energy_parts subEnergyParts(struct energy_parts A, struct ener
 	return { A.Ising - B.Ising, A.Blume - B.Blume };
 }
 
-__device__ struct energy_parts deltaLocalEnergyParts(char currentSpin, char suggestedSpin, struct neibors n) { // Delta of local energy while i -> e switch
-	struct energy_parts suggestedEnergyParts = localEnergyParts(suggestedSpin, n);
-	struct energy_parts currentEnergyParts = localEnergyParts(currentSpin, n);
-	return subEnergyParts(suggestedEnergyParts, currentEnergyParts);
-}
-
 __device__ struct energy_parts calcEnergyParts(char* s, float* E, int L, int N, float D, int r) {
 	struct energy_parts sum = { 0, 0 };
 	for (int j = 0; j < N; j++) {
@@ -154,6 +148,15 @@ __device__ char suggestSpinSwap(curandStatePhilox4_32_10_t* state, int r, char c
 	return (currentSpin + 2 + (curand(&state[r]) % 2)) % 3 - 1; // little trick
 }
 
+#define FULL_MASK 0xffffffff
+
+__device__ float warpReduceSum(float val)
+{
+	for (int offset = warpSize >> 1; offset > 0; offset >>= 1)
+		val += __shfl_down_sync(FULL_MASK, val, offset);
+	return val;
+}
+
 __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E, int L, int N, int R, int q, int nSteps, float U, float D, bool heat){//, int* acceptance_number) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
@@ -168,21 +171,61 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 
 	struct energy_parts baseEnergyParts = calcEnergyParts(s, E, L, N, D, r);
 
-	for (int k = 0; k < N * nSteps; k++) {
+	//for (int k = 0; k < N * nSteps; k++)
+	{
 		int j = curand(&state[r]) % N;
 		char currentSpin = s[j + replica_shift];
 		char suggestedSpin = suggestSpinSwap(state, r, currentSpin);
 		//char suggestedSpin = curand(&state[r]) % 3 - 1;
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift);
-		struct energy_parts deltaEnergyParts = deltaLocalEnergyParts(currentSpin, suggestedSpin, n);
-		struct energy_parts suggestedEnergyParts = addEnergyParts(baseEnergyParts, deltaEnergyParts);
+		struct energy_parts suggestedLocalEnergyParts = localEnergyParts(suggestedSpin, n);
+
+		struct energy_parts currentLocalEnergyParts = localEnergyParts(currentSpin, n);
+		struct energy_parts deltaLocalEnergyParts = subEnergyParts(suggestedLocalEnergyParts, currentLocalEnergyParts);
+		//local energy delta calculated for single spin; but should be for whole lattice
+		//thus we need to count Ising part twice - for the neibors change in energy as well
+		//but not Blume part!
+		deltaLocalEnergyParts.Ising *= 2;
+		struct energy_parts suggestedEnergyParts = addEnergyParts(baseEnergyParts, deltaLocalEnergyParts);
 		float suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D);
+
+		/*
+		if (r == 0) {
+			printf("thread: %i reports:\n", r);
+			printf("\tj: %i \n", j);
+			printf("\tcurrentSpin: %i \n", currentSpin);
+			printf("\tsuggestedSpin: %i \n", suggestedSpin);
+			printf("\tn_i.up: %i \n", n_i.up);
+			printf("\tn_i.right: %i \n", n_i.right);
+			printf("\tn_i.down: %i \n", n_i.down);
+			printf("\tn_i.left: %i \n", n_i.left);
+			printf("\tn.up: %i \n", n.up);
+			printf("\tn.right: %i \n", n.right);
+			printf("\tn.down: %i \n", n.down);
+			printf("\tn.left: %i \n", n.left);
+			printf("\tbaseEnergyParts: %i %i\n", baseEnergyParts.Ising, baseEnergyParts.Blume);
+			printf("\tsuggestedLocalEnergyParts: %i %i\n", suggestedLocalEnergyParts.Ising, suggestedLocalEnergyParts.Blume);
+			printf("\tcurrentLocalEnergyParts: %i %i\n", currentLocalEnergyParts.Ising, currentLocalEnergyParts.Blume);
+			printf("\tdeltaLocalEnergyParts: %i %i\n", deltaLocalEnergyParts.Ising, deltaLocalEnergyParts.Blume);
+			printf("\tsuggestedEnergyParts: %i %i\n", suggestedEnergyParts.Ising, suggestedEnergyParts.Blume);
+			printf("\tsuggestedEnergy: %f \n", suggestedEnergy);
+			printf("\tcondition result: %i \n",
+				((!heat && (suggestedEnergy + EPSILON < U)) || (heat && (suggestedEnergy - EPSILON > U))));
+			printf("thread: %i report end;\n", r);
+		}
+		*/
 		
 		if (( !heat && (suggestedEnergy + EPSILON < U) ) || (heat && (suggestedEnergy - EPSILON > U) )) {
 			baseEnergyParts = suggestedEnergyParts;
 			E[r] = suggestedEnergy;
 			s[j + replica_shift] = suggestedSpin;
+			/*
+			float reductionRes = warpReduceSum(1);
+			if ((threadIdx.x & (warpSize - 1)) == 0)
+				atomicAdd(acceptance_number, reductionRes);
+			*/
+
 		}
 	}
 }
@@ -195,6 +238,13 @@ void CalcPrintAvgE(FILE* efile, float* E, int R, float U) {
 	avg /= R;
 	fprintf(efile, "%f %f\n", U, avg);
 	printf("E: %f\n", avg);
+}
+
+void printAllE(FILE* e3file, float* E, int R, float U) {
+	fprintf(e3file, "%f ", U);
+	for (int i = 0; i < R; i++)
+		fprintf(e3file, "%f ", E[i]);
+	fprintf(e3file, "\n");
 }
 
 void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, float U) {
@@ -270,7 +320,7 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 	//update energy seiling to the highest available energy
 	float U_old = *U;
 	float U_new;
-	
+
 	for (int i = 0; i < R; i++) {
 		U_new = E[O[i]];
 		if ((!heat && U_new < U_old - EPSILON) || (heat && U_new > U_old + EPSILON)) {
@@ -294,6 +344,7 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 	X /= R;
 	fprintf(Xfile, "%f %f\n", *U, X);
 	printf("Culling fraction:\t%f\n", X);
+	fflush(stdout);
 	for (int i = 0; i < R; i++)
 		update[i] = i;
 	if (nCull < R) {
@@ -376,6 +427,8 @@ int main(int argc, char* argv[]) {
 	FILE* nfile = fopen(s, "w");	// number of sweeps
 	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
+	FILE* e3file = fopen(s, "w");	// cluster size histogram
 
 
 	size_t fullLatticeByteSize = R * N * sizeof(char);
@@ -425,16 +478,27 @@ int main(int argc, char* argv[]) {
 	gpuErrchk(cudaDeviceSynchronize());
 	cudaMemset(deviceE, 0, R * sizeof(int));
 
+	
+	//init testing values
 	/*
-	//init testing values 
 	deviceEnergy <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, L, N, D);
 	gpuErrchk(cudaPeekAtLastError());
 	gpuErrchk(cudaDeviceSynchronize());
 	gpuErrchk( cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost) );
-	int* device_acceptance_number;
-	gpuErrchk( cudaMalloc((void**)&device_acceptance_number, sizeof(int)) );
+	
 	char* hostSpin = (char*)malloc(N * sizeof(char)); // test shit
+	gpuErrchk(cudaMemcpy(hostSpin, deviceSpin, N * sizeof(char), cudaMemcpyDeviceToHost)); // take one replica (first)
+	for (int i = 0; i < L; i++) {
+		for (int j = 0; j < L; j++) {
+			printf("%i ", hostSpin[i * L + j]);
+		}
+		printf("\n");
+	}
+
+
 	int host_acceptance_number = 0;
+	int* device_acceptance_number;
+	gpuErrchk(cudaMalloc((void**)&device_acceptance_number, sizeof(int)));
 	*/
 
 	float upper_energy = N * D + 2 * N;
@@ -443,7 +507,7 @@ int main(int argc, char* argv[]) {
 
 	//CalcPrintAvgE(efile, hostE, R, U);
 
-	
+
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
 		fprintf(nfile, "%f %d\n", U, nSteps);
 		printf("U:\t%f out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
@@ -453,9 +517,10 @@ int main(int argc, char* argv[]) {
 
 		//cudaMemset(device_acceptance_number, 0, sizeof(int));
 
-		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D, heat);//, device_acceptance_number);
+		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D, heat);// , device_acceptance_number);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
+		gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
 
 		/*
 		gpuErrchk(cudaMemcpy(&host_acceptance_number, device_acceptance_number, sizeof(int), cudaMemcpyDeviceToHost));
@@ -464,7 +529,16 @@ int main(int argc, char* argv[]) {
 		clock_t end = clock();
 		double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 		printf("Time: %f seconds\n", time_spent);
-		*/
+
+
+		gpuErrchk(cudaMemcpy(hostSpin, deviceSpin, N * sizeof(char), cudaMemcpyDeviceToHost)); // take one replica (first)
+		for (int i = 0; i < L; i++) {
+			for (int j = 0; j < L; j++) {
+				printf("%i ", hostSpin[i * L + j]);
+			}
+			printf("\n");
+		}
+
 		//cudaDeviceSynchronize();
 
 		// Create disordered cluster size histogram in particular energy range
@@ -476,11 +550,24 @@ int main(int argc, char* argv[]) {
 		//gpuErrchk(cudaDeviceSynchronize());
 		
 		gpuErrchk( cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost) );
+		//printAllE(e3file, hostE, R, U);
 
-		/*
+		
 		printf("E: ");
 		for (int i = 0; i < 10; i++) {
 			printf("%f ", hostE[i]);
+		}
+		printf("\n");
+
+		printf("O: ");
+		for (int i = 0; i < 10; i++) {
+			printf("%i ", energyOrder[i]);
+		}
+		printf("\n");
+
+		printf("E[O]: ");
+		for (int i = 0; i < 10; i++) {
+			printf("%f ", hostE[energyOrder[i]]);
 		}
 		printf("\n");
 		*/
@@ -503,6 +590,8 @@ int main(int argc, char* argv[]) {
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		printf("\n");
+
+		//gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
 	}
 	
 
@@ -529,6 +618,7 @@ int main(int argc, char* argv[]) {
 	fclose(ptfile);
 	fclose(nfile);
 	fclose(chfile);
+	fclose(e3file);
 
 	// End
 	return 0;
