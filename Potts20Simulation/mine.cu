@@ -171,7 +171,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 
 	struct energy_parts baseEnergyParts = calcEnergyParts(s, E, L, N, D, r);
 
-	//for (int k = 0; k < N * nSteps; k++)
+	for (int k = 0; k < N * nSteps; k++)
 	{
 		int j = curand(&state[r]) % N;
 		char currentSpin = s[j + replica_shift];
