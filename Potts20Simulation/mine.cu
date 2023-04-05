@@ -9,8 +9,7 @@
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
 
-// float precission
-#define EPSILON 0.0001f
+#define EPSILON 0
 
 // check errors
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -23,9 +22,6 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 	}
 }
 
-bool cmpf(float x, float y) {
-	return fabs(x - y) < EPSILON;
-};
 
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
@@ -114,7 +110,7 @@ __device__ struct energy_parts subEnergyParts(struct energy_parts A, struct ener
 	return { A.Ising - B.Ising, A.Blume - B.Blume };
 }
 
-__device__ struct energy_parts calcEnergyParts(char* s, float* E, int L, int N, float D, int r) {
+__device__ struct energy_parts calcEnergyParts(char* s, float* E, int L, int N, int r) {
 	struct energy_parts sum = { 0, 0 };
 	for (int j = 0; j < N; j++) {
 		// do not forget double joint summarization!
@@ -128,14 +124,14 @@ __device__ struct energy_parts calcEnergyParts(char* s, float* E, int L, int N, 
 	return sum;
 }
 
-__device__ float calcEnergyFromParts(struct energy_parts energyParts, float D) {
-	return (energyParts.Ising / 2) + (D * energyParts.Blume); // div 2 because of double joint summarization
+__device__ int calcEnergyFromParts(struct energy_parts energyParts, int D_div, int D_base) { // D = D_div / D_base
+	return (D_base * energyParts.Ising / 2) + (D_div * energyParts.Blume); // div 2 because of double joint summarization
 }
 
-__global__ void deviceEnergy(char* s, float* E, int L, int N, float D) {
+__global__ void deviceEnergy(char* s, float* E, int L, int N, int D_div, int D_base) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
-	struct energy_parts sum = calcEnergyParts(s, E, L, N, D, r);
-	E[r] = calcEnergyFromParts(sum, D);
+	struct energy_parts sum = calcEnergyParts(s, E, L, N, r);
+	E[r] = calcEnergyFromParts(sum, D_base, D_div);
 }
 
 // hardcoded spin suggestion for init
@@ -157,7 +153,7 @@ __device__ float warpReduceSum(float val)
 	return val;
 }
 
-__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E, int L, int N, int R, int q, int nSteps, float U, float D, bool heat) {//, int* acceptance_number) {
+__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E, int L, int N, int R, int q, int nSteps, float U, int D_div, int D_base, bool heat) {//, int* acceptance_number) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
@@ -169,7 +165,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 
-	struct energy_parts baseEnergyParts = calcEnergyParts(s, E, L, N, D, r);
+	struct energy_parts baseEnergyParts = calcEnergyParts(s, E, L, N, r);
 
 	for (int k = 0; k < N * nSteps; k++)
 	{
@@ -188,7 +184,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 		//but not Blume part!
 		deltaLocalEnergyParts.Ising *= 2;
 		struct energy_parts suggestedEnergyParts = addEnergyParts(baseEnergyParts, deltaLocalEnergyParts);
-		float suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D);
+		float suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D_div, D_base);
 
 		/*
 		if (r == 0) {
@@ -229,21 +225,14 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 	}
 }
 
-void CalcPrintAvgE(FILE* efile, float* E, int R, float U) {
+void CalcPrintAvgE(FILE* efile, int * E, int R, int U, int D_base) {
 	float avg = 0.0;
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
 	}
 	avg /= R;
-	fprintf(efile, "%f %f\n", U, avg);
+	fprintf(efile, "%f %f\n", 1.0 * U / D_base, avg);
 	printf("E: %f\n", avg);
-}
-
-void printAllE(FILE* e3file, float* E, int R, float U) {
-	fprintf(e3file, "%f ", U);
-	for (int i = 0; i < R; i++)
-		fprintf(e3file, "%f ", E[i]);
-	fprintf(e3file, "\n");
 }
 
 void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, float U) {
@@ -281,7 +270,7 @@ void Swap(int* A, int i, int j) {
 	A[j] = temp;
 }
 
-void quicksort(float* E, int* O, int left, int right, int direction) {
+void quicksort(int* E, int* O, int left, int right, int direction) {
 	int Min = (left + right) / 2;
 	int i = left;
 	int j = right;
@@ -309,16 +298,16 @@ void quicksort(float* E, int* O, int left, int right, int direction) {
 	}
 }
 
-int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U, FILE* e2file, FILE* Xfile, bool heat) {
+int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int D_base, FILE* e2file, FILE* Xfile, bool heat) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
 	quicksort(E, O, 0, R - 1, 1 - 2 * heat); //Sorts O by energy
 
 	int nCull = 0;
-	fprintf(e2file, "%f %f\n", U, E[O[0]]);
+	fprintf(e2file, "%f %f\n", 1.0 * (*U) / D_base, E[O[0]]);
 
 	//update energy seiling to the highest available energy
-	float U_old = *U;
-	float U_new;
+	int U_old = *U;
+	int U_new;
 
 	for (int i = 0; i < R; i++) {
 		U_new = E[O[i]];
@@ -341,7 +330,7 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 	// culling fraction
 	double X = nCull;
 	X /= R;
-	fprintf(Xfile, "%f %f\n", *U, X);
+	fprintf(Xfile, "%f %f\n", 1.0 * (*U) / D_base, X);
 	printf("Culling fraction:\t%f\n", X);
 	fflush(stdout);
 	for (int i = 0; i < R; i++)
@@ -404,8 +393,9 @@ int main(int argc, char* argv[]) {
 	int q = 3;
 
 	//Blume-Capel model parameter
-	float D = atof(argv[6]);
-	bool heat = atoi(argv[7]); // 0 if cooling (default) and 1 if heating
+	int D_div = atof(argv[6]), int D_base = atof(argv[7]);
+	float D = 1.0 * D_div / D_base;
+	bool heat = atoi(argv[8]); // 0 if cooling (default) and 1 if heating
 
 
 	// initializing files to write in
@@ -414,20 +404,22 @@ int main(int argc, char* argv[]) {
 	printf("running 2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt\n", heating, q, D, N, R, nSteps, run_number);
 
 	char s[100];
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
-	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* e3file = fopen(s, "w");	// cluster size histogram
+	/*
+	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
+	FILE* e3file = fopen(s, "w");
+	*/
 	/*
 	sprintf(s, "datasets//hysteresis//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%ds.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* sfile = fopen(s, "w");	// spin system sample
@@ -437,7 +429,7 @@ int main(int argc, char* argv[]) {
 
 	// Allocate space on host
 	char* hostSpin = (char*)malloc(fullLatticeByteSize);
-	float* hostE = (float*)malloc(R * sizeof(float));
+	int* hostE = (int*)malloc(R * sizeof(int));
 	int* hostUpdate = (int*)malloc(R * sizeof(int));
 	int* replicaFamily = (int*)malloc(R * sizeof(int));
 	int* energyOrder = (int*)malloc(R * sizeof(int));
@@ -448,10 +440,10 @@ int main(int argc, char* argv[]) {
 
 	// Allocate memory on device
 	char* deviceSpin; // s, d_s
-	float* deviceE;
+	int* deviceE;
 	int* deviceUpdate;
 	gpuErrchk(cudaMalloc((void**)&deviceSpin, fullLatticeByteSize));
-	gpuErrchk(cudaMalloc((void**)&deviceE, R * sizeof(float)));
+	gpuErrchk(cudaMalloc((void**)&deviceE, R * sizeof(int)));
 	gpuErrchk(cudaMalloc((void**)&deviceUpdate, R * sizeof(int)));
 
 	// Allocate memory for histogram calculation
@@ -468,7 +460,7 @@ int main(int argc, char* argv[]) {
 	// Init Philox
 	curandStatePhilox4_32_10_t* devStates;
 	gpuErrchk(cudaMalloc((void**)&devStates, R * sizeof(curandStatePhilox4_32_10_t)));
-	setup_kernel << < BLOCKS, THREADS >> > (devStates, seed);
+	setup_kernel <<< BLOCKS, THREADS >>> (devStates, seed);
 	gpuErrchk(cudaPeekAtLastError());
 	gpuErrchk(cudaDeviceSynchronize());
 
@@ -476,7 +468,7 @@ int main(int argc, char* argv[]) {
 	srand(seed);
 
 	// Actually working part
-	initializePopulation << < BLOCKS, THREADS >> > (devStates, deviceSpin, N, q);
+	initializePopulation <<< BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
 	gpuErrchk(cudaPeekAtLastError());
 	gpuErrchk(cudaDeviceSynchronize());
 	cudaMemset(deviceE, 0, R * sizeof(int));
@@ -505,71 +497,45 @@ int main(int argc, char* argv[]) {
 
 
 
-	float upper_energy = N * D + 2 * N;
-	float lower_energy = -N * D - 2 * N;
+	float upper_energy = N * D_div + 2 * N * D_base;
+	float lower_energy = -N * D_div - 2 * N * D_base;
 
-	int w = 0;
+	int U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
 
-	do {
-		float U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
+	//CalcPrintAvgE(efile, hostE, R, U);
 
-		//CalcPrintAvgE(efile, hostE, R, U);
+	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
+		fprintf(nfile, "%f %d\n", U, nSteps);
+		printf("U:\t%f out of %d; nSteps: %d;\n", 1.0 * U / D_base, -2 * N, nSteps);
 
-		while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
-			fprintf(nfile, "%f %d\n", U, nSteps);
-			printf("U:\t%f out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
-
-			equilibrate << < BLOCKS, THREADS >> > (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D, heat);// , device_acceptance_number);
-			gpuErrchk(cudaPeekAtLastError());
-			gpuErrchk(cudaDeviceSynchronize());
-			gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
+		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D_div, D_base, heat);// , device_acceptance_number);
+		gpuErrchk(cudaPeekAtLastError());
+		gpuErrchk(cudaDeviceSynchronize());
+		gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
 
 
-			// record average energy and rho t
-			CalcPrintAvgE(efile, hostE, R, U);
-			CalculateRhoT(replicaFamily, ptfile, R, U);
-			// perform resampling step on cpu
-			// also lowers energy seiling U
+		// record average energy and rho t
+		CalcPrintAvgE(efile, hostE, R, U, D_base);
+		CalculateRhoT(replicaFamily, ptfile, R, U);
+		// perform resampling step on cpu
+		// also lowers energy seiling U
 
-			int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, e2file, Xfile, heat);
-			if (error)
-			{
-				printf("Process ended with zero replicas\n");
-				break;
-			}
-			// copy list of replicas to update back to gpu
-			gpuErrchk(cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice));
-			updateReplicas << < BLOCKS, THREADS >> > (deviceSpin, deviceE, deviceUpdate, N);
-			gpuErrchk(cudaPeekAtLastError());
-			gpuErrchk(cudaDeviceSynchronize());
-			printf("\n");
-
-			if ((U <= 400) || (U >= 3000))
-				break;
+		int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, D_base, e2file, Xfile, heat);
+		if (error)
+		{
+			printf("Process ended with zero replicas\n");
+			break;
 		}
+		// copy list of replicas to update back to gpu
+		gpuErrchk(cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice));
+		updateReplicas <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, deviceUpdate, N);
+		gpuErrchk(cudaPeekAtLastError());
+		gpuErrchk(cudaDeviceSynchronize());
+		printf("\n");
 
-		//print S
-		/*
-		gpuErrchk(cudaMemcpy(hostSpin, deviceSpin, N * sizeof(char), cudaMemcpyDeviceToHost)); // take one replica (first)
-		for (int z = 0; z < 1000; z++) {
-			fprintf(sfile, "walk: %i\n", w);
-			for (int i = 0; i < L; i++) {
-				for (int j = 0; j < L; j++) {
-					fprintf(sfile, "%i ", hostSpin[i * L + j]);
-				}
-				fprintf(sfile, "\n");
-			}
-			fprintf(sfile, "\n");
-		}
-		*/
 
-		//here we change direction of heating and look for hysteresis effects
-		heat = 1 - heat;
-		U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
-		fprintf(Xfile, "\nHysteresis switch;\n");
+	}
 
-		w++;
-	} while (w <= 2);
 
 
 	// Free memory and close files
@@ -596,7 +562,7 @@ int main(int argc, char* argv[]) {
 	fclose(ptfile);
 	fclose(nfile);
 	fclose(chfile);
-	fclose(e3file);
+	//fclose(e3file);
 	/*
 	fclose(sfile);
 	*/
