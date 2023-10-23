@@ -5,7 +5,7 @@ NVCC= nvcc
 # Flags
 CFLAGS=
 MPICFLAGS=
-GENCODE_SM35= -arch=sm_35
+GENCODE_SM35=
 NVCCFLAGS=$(GENCODE_SM35)
 CUDALDFLAGS=-L/usr/local/cuda/lib64 -lcudart
 

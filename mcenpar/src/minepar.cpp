@@ -1,8 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
 #include <mpi.h>
-
+#include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include "minepar.h"
@@ -36,22 +35,50 @@
 		Also, when its about generation random numbers, we use R threads, one for each replica
 
 -------------------------------------------------------------------------------------------------------------*/
+
+int direction;
 bool cmpf(float x, float y) {
 	return fabs(x - y) < EPSILON;
 };
+int cstring_cmp(const void *a, const void *b) 
+{ 
+/*    const char **ia = (const char **)a;
+    const char **ib = (const char **)b;*/
+    return strcmp((char *)a, (char *)b);
+	/* strcmp functions works exactly as expected from
+ * 	comparison function */ 
+}
+int EnOr_cmpenergy(const void * a, const void * b)
+{
+    return (direction*((*(struct EnOr*)b).Energy - (*(struct EnOr*)a).Energy ));
+}
+int EnOr_cmprank(const void * a, const void * b)
+{
+    return (((*(struct EnOr*)b).Rank - (*(struct EnOr*)a).Rank ));
+}
+int EnOr_cmpnumber(const void * a, const void * b)
+{
+    return (((*(struct EnOr*)b).Number - (*(struct EnOr*)a).Number ));
+}
+void cudaMPIset(int device);
 void BLTH(int BL, int TH);
+void defND(int Ri, int TH);
 void cudaMPImalloc(void** ptr, size_t size);
 void cudaMPIfree(void* ptr);
 void cudaMPImallocdevstate(int size);
-void setup_kernelMPI(int seed);
+void setup_kernelMPI(unsigned long long seed);
 void cudaPeekAtLastErrorMPI();
 void cudaDeviceSynchronizeMPI();
-void initializePopulationMPI(char* s, int N, int q);
+void initializePopulationMPI(unsigned long long seed, unsigned long long initial_sequence, Replica* Rep, int q, int R);
 void cudaMPImemset(void* ptr, int val, size_t size);
 void cudaMPImemcpyD2H(void* dst, const void* src, size_t count);
 void cudaMPImemcpyH2D(void* dst, const void* src, size_t count);
-void equilibrateMPI(char* deviceSpin, float* deviceE, int L, int N, int R, int q, int nSteps, float U, float D, bool heat);
-void updateReplicasMPI(char* s, float* E, int* update, int N);
+void equilibrateMPI(unsigned long long seed, unsigned long long initial_sequence, Replica* Rep, EnOr* deviceEnOr, int R, int q, int nSteps, float U, float D, int heat);
+void updateReplicasMPI(Replica* Rep, float* E, int* update);
+void copyreploffMPI(Replica* Rep, EnOr* reploff, int R);
+void cudaCalcParSum(Replica* Repptr, int Rc);
+void cudaresampleKer(Replica* Repptr, Replica* Repptrdest);
+void cudablocksumKer(Replica* Repptr, int Rlocalc, unsigned int* Rnewc);
 void cudaMPIend();
 void CalcPrintAvgE(FILE* efile, float* E, int R, float U) {
 	float avg = 0.0;
@@ -121,19 +148,22 @@ void quicksort(float* E, int* O, int left, int right, int direction) {
 	}
 }
 
-int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U, FILE* e2file, FILE* Xfile, bool heat) {
+int resample(EnOr* E, int R, float* U, FILE* e2file, FILE* Xfile, int heat) {
 	//std::sort(O, O + R, [&E](int a, int b) {return E[a] > E[b]; }); // greater sign for descending order
-	quicksort(E, O, 0, R - 1, 1 - 2 * heat); //Sorts O by energy
+	//quicksort(E, O, 0, R - 1, 1 - 2 * heat); //Sorts O by energy
+	qsort(E,R,sizeof(EnOr),EnOr_cmpenergy);
 
 	int nCull = 0;
-	fprintf(e2file, "%f %f\n", U, E[O[0]]);
+	//fprintf(e2file, "%f %f\n", U, E[O[0]]);
+	fprintf(e2file, "%f %f\n", U, E[0]);
 
 	//update energy seiling to the highest available energy
 	float U_old = *U;
 	float U_new;
 
 	for (int i = 0; i < R; i++) {
-		U_new = E[O[i]];
+		//U_new = E[O[i]];
+		U_new = E[i].Energy;
 		if ((!heat && U_new < U_old - EPSILON) || (heat && U_new > U_old + EPSILON)) {
 			*U = U_new;
 			break;
@@ -144,7 +174,7 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 		return 1; // out of replicas
 	}
 
-	while ((!heat && E[O[nCull]] >= *U - EPSILON) || (heat && E[O[nCull]] <= *U + EPSILON)) {
+	while ((!heat && E[nCull].Energy >= *U - EPSILON) || (heat && E[nCull].Energy <= *U + EPSILON)) {
 		nCull++;
 		if (nCull == R) {
 			break;
@@ -156,14 +186,13 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 	fprintf(Xfile, "%f %f\n", *U, X);
 	printf("Culling fraction:\t%f\n", X);
 	fflush(stdout);
-	for (int i = 0; i < R; i++)
-		update[i] = i;
+	for (int i = 0; i < R; i++){
+		E[i].Roff = 1;}
 	if (nCull < R) {
 		for (int i = 0; i < nCull; i++) {
 			// random selection of unculled replica
 			int r = (rand() % (R - nCull)) + nCull; // different random number generator for resampling
-			update[O[i]] = O[r];
-			replicaFamily[O[i]] = replicaFamily[O[r]];
+			E[i].Roff = 0; E[r].Roff++;
 		}
 	}
 
@@ -172,73 +201,162 @@ int resample(float* E, int* O, int* update, int* replicaFamily, int R, float* U,
 
 int main(int argc, char* argv[]) {
 
+	int wank, nprocs, namelen, myrank, color, n;
+	size_t bytes;
+	int i, j;
+	MPI_Comm nodeComm;
+	MPI_Datatype ReplicaMPI, EnOrMPI;
+	int EnOrCount=4;
+	int array_of_blocklengthsEnOr[] = { 1,1,1,1 };
+	MPI_Aint array_of_displacementsEnOr[] = { offsetof( EnOr, Energy ),
+                                      offsetof( EnOr, Number ),
+                                      offsetof( EnOr, Rank ),
+                                      offsetof( EnOr, Roff)  };
+    MPI_Datatype array_of_typesEnOr[] = { MPI_FLOAT, MPI_INT, MPI_INT, MPI_UNSIGNED };
+	char host_name[MPI_MAX_PROCESSOR_NAME];
+	char (*host_names)[MPI_MAX_PROCESSOR_NAME];
+
+    MPI_Init(&argc, &argv);
+	MPI_Comm_rank(MPI_COMM_WORLD, &wank);
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+	MPI_Get_processor_name(host_name,&namelen);
+
+	bytes = nprocs * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
+	host_names = (char (*)[MPI_MAX_PROCESSOR_NAME]) malloc(bytes);
+	strcpy(host_names[wank], host_name);
+	for (n=0; n<nprocs; n++)
+	{
+		MPI_Bcast(&(host_names[n]),MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, MPI_COMM_WORLD);
+	}
+    printf("%d %d %s\n", wank, nprocs, host_name);
+	qsort(host_names, nprocs,  sizeof(char[MPI_MAX_PROCESSOR_NAME]), cstring_cmp);
+	color = 0;
+	for (n=0; n<nprocs; n++)
+	{ 
+		if(n>0&&strcmp(host_names[n-1], host_names[n])) color++;
+		if(strcmp(host_name, host_names[n]) == 0) break;
+	}
+	MPI_Comm_split(MPI_COMM_WORLD, color, 0, &nodeComm);
+	MPI_Comm_rank(nodeComm, &myrank);
+
+    /* Assign device to MPI process*/
+	printf ("Assigning device %d  to process on node %s rank %d \n", myrank,  host_name, wank );
+	cudaMPIset(myrank);
+	
+	exit(1);
+
 	// Parameters:
+	int run_number, BLOCKS_C, THREADS_C, nSteps;
+	unsigned long long seed, initial_sequence = 0;
+	unsigned int seedh;
+	if(!wank){
+		run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
+		//int grid_width = atoi(argv[2]);	// should not be more than 256 due to MTGP32 limits
+		//int L = atoi(argv[2]);	// Lattice size
+		//int N = L * L;
+		//int R = grid_width * BLOCKS;	// Population size
+		BLOCKS_C = atoi(argv[2]);
+		THREADS_C = atoi(argv[3]);
+		nSteps = atoi(argv[4]);
+	}
+	MPI_Bcast(&run_number,1,MPI_INT,0,MPI_COMM_WORLD);
+	seed = run_number+wank; seedh = run_number;
+	MPI_Bcast(&BLOCKS_C,1,MPI_INT,0,MPI_COMM_WORLD);
+	MPI_Bcast(&THREADS_C,1,MPI_INT,0,MPI_COMM_WORLD);
+	MPI_Bcast(&nSteps,1,MPI_INT,0,MPI_COMM_WORLD);
 
-	int run_number = atoi(argv[1]);	// A number to label this run of the algorithm, used for data keeping purposes, also, a seed
-	int seed = run_number;
-	//int grid_width = atoi(argv[2]);	// should not be more than 256 due to MTGP32 limits
-	int L = atoi(argv[2]);	// Lattice size
-	int N = L * L;
-	//int R = grid_width * BLOCKS;	// Population size
-	int BLOCKS_C = atoi(argv[3]);
-	int THREADS_C = atoi(argv[4]);
-	int nSteps = atoi(argv[5]);
+	int R = BLOCKS_C * THREADS_C, Ract; // R is "typical" number of replicas per one node, Ract is actual number at the current step
+	Ract = R;
+	int Rlen=10000,Rlenadd=10000; // Rlen is length of array Rcur, after reallocation it is Rlen+Rlenadd
+	int *Rcur,*Rcurnew; // Rcur is array with population size on each step, Rcurnew is the same array, when length has been exceeded 
+	Rcur=(int*)malloc(Rlen*sizeof(int));
+	int ir=0; // ir is counter in main cycle
 
-	int R = BLOCKS_C * THREADS_C;
+
+	MPI_Type_create_struct( EnOrCount, array_of_blocklengthsEnOr, array_of_displacementsEnOr,
+                        array_of_typesEnOr, &EnOrMPI );
+
+    MPI_Type_commit( &EnOrMPI );
+
+	
+	Replica* hostSpin;
+	Replica* deviceSpin;
+	Replica* deviceSpinNew;
+	FILE *efile,*e2file,*Xfile,*ptfile,*nfile,*chfile,*e3file,*sfile;
 
 	// q parameter for potts model, each spin variable can take on values 0 - q-1
 	// strictly hardcoded
 	int q = 3;
 
-	//Blume-Capel model parameter
-	float D = atof(argv[6]);
-	bool heat = atoi(argv[7]); // 0 if cooling (default) and 1 if heating
+	float D;
+	int heat;
+	if(!wank){
+		//Blume-Capel model parameter
+		D = atof(argv[5]);
+		heat = atoi(argv[6]); // 0 if cooling (default) and 1 if heating
 
-
-	// initializing files to write in
-	const char* heating = heat ? "Heating" : "";
-
-	printf("running 2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt\n", heating, q, D, N, R, nSteps, run_number);
-
-	char s[100];
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* chfile = fopen(s, "w");	// cluster size histogram
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* e3file = fopen(s, "w");	// cluster size histogram
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%ds.txt", heating, q, D, N, R, nSteps, run_number);
-	FILE* sfile = fopen(s, "w");	// spin system sample
-
-	size_t fullLatticeByteSize = R * N * sizeof(char);
+		// initializing files to write in
+		const char* heating = heat ? "Heating" : "";
+		printf("running 2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt\n", heating, q, D, N, R, nSteps, run_number);
+		char s[100];
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
+		efile = fopen(s, "w");	// average energy
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
+		e2file = fopen(s, "w");	// surface (culled) energy
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
+		Xfile = fopen(s, "w");	// culling fraction
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
+		ptfile = fopen(s, "w");	// rho t
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
+		nfile = fopen(s, "w");	// number of sweeps
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
+		chfile = fopen(s, "w");	// cluster size histogram
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
+		e3file = fopen(s, "w");	// cluster size histogram
+		sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%ds.txt", heating, q, D, N, R, nSteps, run_number);
+		sfile = fopen(s, "w");	// spin system sample
+	}
+	MPI_Bcast(&D,1,MPI_FLOAT,0,MPI_COMM_WORLD);
+	MPI_Bcast(&heat,1,MPI_INT,0,MPI_COMM_WORLD);
+	direction=2*heat-1;
+//### Move allocate space on host to main cycle body ### free devStates
+	//size_t fullLatticeByteSize = R * N * sizeof(char);
+	size_t fullLBS = R * sizeof(Replica);
 
 	// Allocate space on host
-	char* hostSpin = (char*)malloc(fullLatticeByteSize);
-	float* hostE = (float*)malloc(R * sizeof(float));
-	int* hostUpdate = (int*)malloc(R * sizeof(int));
-	int* replicaFamily = (int*)malloc(R * sizeof(int));
-	int* energyOrder = (int*)malloc(R * sizeof(int));
-	for (int i = 0; i < R; i++) {
-		energyOrder[i] = i;
+	//hostSpin = (Replica*)malloc(fullLBS);
+	//float* hostE;
+	EnOr* hostEnOr;
+	EnOr* hostrootEnOr;
+	int* hostUpdate = (int*)malloc(R * nprocs * sizeof(int));
+	int* replicaFamily = (int*)malloc(R * nprocs * sizeof(int));
+	//unsigned int* reploffH = (unsigned int*)malloc(R * sizeof(unsigned int));
+	//int* energyOrder = (int*)malloc(R * sizeof(int));
+	for (int i = 0; i < R*nprocs; i++) {
+		//energyOrder[i] = i;
 		replicaFamily[i] = i;
 	}
+	
+	int* Rcroot; // Rcroot is nprocs-size array just for current temperature step
+	int *recvcounts, *displs; // arrays for MPI_Gatherv, MPI_Scatterv
 
+
+	Rcroot=(int *)malloc(sizeof(int)*nprocs);
+	
 	// Allocate memory on device
-	char* deviceSpin; // s, d_s
-	float* deviceE;
+	//char* deviceSpin; // s, d_s
+	//float* deviceE;
+	EnOr* deviceEnOr;
 	int* deviceUpdate;
-	cudaMPImalloc((void**)&deviceSpin, fullLatticeByteSize);
-	cudaMPImalloc((void**)&deviceE, R * sizeof(float));
+	//unsigned int* reploffD;
+	unsigned int* Ridev;
+	cudaMPImalloc((void**)&deviceSpin, fullLBS);
+	//cudaMPImalloc((void**)&deviceE, R * sizeof(float));
 	cudaMPImalloc((void**)&deviceUpdate, R * sizeof(int));
-	BLTH(BLOCKS_C,THREADS_C);
+	//cudaMPImalloc((void**)&reploffD, R * sizeof(unsigned int));
+	cudaMPImalloc((void**)&Ridev,sizeof(int));
+	//BLTH(BLOCKS_C,THREADS_C);
 
 	// Allocate memory for histogram calculation
 	/*
@@ -251,21 +369,27 @@ int main(int argc, char* argv[]) {
 	gpuErrchk( cudaMalloc((void**)&deviceStack, N * R * sizeof(int)) );
 	*/
 
-	// Init Philox
-	cudaMPImallocdevstate(R);
-	setup_kernelMPI(seed);
+	// Init Philox in new version is not needed - all random numbers are generated
+	// directly from seed, initial_sequence
+	// cudaMPImallocdevstate(R);
+	// setup_kernelMPI(seed);
 	
 	cudaPeekAtLastErrorMPI();
 	cudaDeviceSynchronizeMPI();
 	
 	// Init std random generator for little host part
-	srand(seed);
+	if(!wank){
+		srand(seedh);
+		hostrootEnOr = (EnOr*)malloc(R * nprocs * sizeof(EnOr));
+		recvcounts = (int*)malloc(nprocs*sizeof(int));
+		displs = (int*)malloc(nprocs*sizeof(int));
+	}
 
 	// Actually working part
-	initializePopulationMPI(deviceSpin, N, q);
+	initializePopulationMPI(seed, initial_sequence, deviceSpin, q, R);initial_sequence+=R;
 	cudaPeekAtLastErrorMPI();
 	cudaDeviceSynchronizeMPI();	
-	cudaMPImemset(deviceE, 0, R * sizeof(float));
+	//cudaMPImemset(deviceE, 0, R * sizeof(float));
 
 
 	
@@ -297,21 +421,43 @@ int main(int argc, char* argv[]) {
 
 	//CalcPrintAvgE(efile, hostE, R, U);
 
-
+// replace condition in cycle by standard, when root process determines, whether to continue
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
+		if (ir==Rlen){ // reallocating Rlen
+			Rcurnew=(int*)malloc((Rlen+Rlenadd)*sizeof(int));
+			memcpy(Rcurnew,Rcur,Rlen*sizeof(int));free(Rcur);Rcur=Rcurnew;Rlen+=Rlenadd;
+		}
 		fprintf(nfile, "%f %d\n", U, nSteps);
 		printf("U:\t%f out of %d; nSteps: %d;\n", U, -2 * N, nSteps);
+		Rcur[i]=Ract;
+
+// defND here, define R at next step at the bottom of the cycle, add if(idx<R) in cuda functions
+// defND after replica exchange, make R[] unsigned int instead of int
+		defND(Ract,THREADS_C);
+		fullLBS = Ract * sizeof(Replica);
 
 		// Perform monte carlo sweeps on gpu
 		//clock_t begin = clock();
 
 		//cudaMemset(device_acceptance_number, 0, sizeof(int));
-
-		equilibrateMPI(deviceSpin, deviceE, L, N, R, q, nSteps, U, D, heat);// , device_acceptance_number);
+		cudaMPImalloc((void**)&deviceEnOr, Ract * sizeof(EnOr));
+		equilibrateMPI(seed, initial_sequence, deviceSpin, deviceEnOr, Ract, q, nSteps, U, D, heat);initial_sequence+=Ract;// , device_acceptance_number);
 		cudaPeekAtLastErrorMPI();
 		cudaDeviceSynchronizeMPI();
-		cudaMPImemcpyD2H(hostE, deviceE, R * sizeof(int));	
-		
+		hostEnOr = (EnOr*)malloc(Ract * sizeof(EnOr));
+		cudaMPImemcpyD2H(hostEnOr, deviceEnOr, Ract * sizeof(EnOr));
+		for(i=0;i<Ract;i++){
+			hostEnOr[i].Number=i;hostEnOr[i].Rank=wank;hostEnOr[i].Roff=0;
+		}
+		MPI_Gather(&Ract, 1, MPI_INT, Rcroot, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		if(!wank){
+			displs[0]=0;
+			for(i=0;i<nprocs-1;i++){
+				recvcounts[i]=Rcroot[i];displs[i+1]=displs[i]+recvcounts[i];
+			}
+			recvcounts[nprocs-1]=Rcroot[nprocs-1];
+		}
+		MPI_Gatherv(hostEnOr,Ract,EnOrMPI,hostrootEnOr,recvcounts,displs,EnOrMPI,0,MPI_COMM_WORLD);
 		/*
 		gpuErrchk(cudaMemcpy(&host_acceptance_number, device_acceptance_number, sizeof(int), cudaMemcpyDeviceToHost));
 		printf("acceptance_number: %i\nacceptance_ratio: %02f \n", host_acceptance_number, 100.0 * host_acceptance_number / (N * R * nSteps) );
@@ -363,50 +509,83 @@ int main(int argc, char* argv[]) {
 		*/
 
 		// record average energy and rho t
-		CalcPrintAvgE(efile, hostE, R, U);
-		CalculateRhoT(replicaFamily, ptfile, R, U);
+		// todo CalcPrintAvgE(efile, hostE, R, U);
+		// CalculateRhoT(replicaFamily, ptfile, R, U);
 		// perform resampling step on cpu
 		// also lowers energy seiling U
 		
-		int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, e2file, Xfile, heat);
-		if (error)
-		{
-			printf("Process ended with zero replicas\n");
-			break;
-		}
-		cudaMPImemcpyD2H(hostSpin, deviceSpin, fullLatticeByteSize);
-		fprintf(sfile, "%f\n", U);
-		for (int i = 0; i < L; i++) {
-			for (int j = 0; j < L; j++) {
-				fprintf(sfile, "%i ", hostSpin[i * L + j]);
+		if(!wank){
+			int error = resample(hostrootEnOr, R*nprocs, &U, e2file, Xfile, heat);
+			if (error)
+			{
+				printf("Process ended with zero replicas\n");
+				break;
 			}
-			fprintf(sfile, "\n");
+			qsort(hostrootEnOr,R*nprocs,sizeof(EnOr),EnOr_cmprank);
 		}
+		MPI_Scatterv(hostrootEnOr,recvcounts,displs,EnOrMPI,hostEnOr,Ract,EnOrMPI,0,MPI_COMM_WORLD);
+		qsort(hostEnOr,Ract,sizeof(EnOr),EnOr_cmpnumber);
+		// todo CalculateRhoT(replicaFamily, ptfile, R, U);
+		
+		hostSpin = (Replica*)malloc(fullLBS);
+		cudaMPImemcpyD2H(hostSpin, deviceSpin, fullLBS);
+		if(!wank){
+			fprintf(sfile, "%f\n", U);
+			for (i = 0; i < L; i++) {
+				for (j = 0; j < L; j++) {
+					fprintf(sfile, "%i ", hostSpin[0].sp[i * L + j]);
+				}
+				fprintf(sfile, "\n");
+			}
+		}
+		free(hostSpin);
 		// copy list of replicas to update back to gpu
-		cudaMPImemcpyH2D(deviceUpdate, hostUpdate, R * sizeof(int));
-		updateReplicasMPI(deviceSpin, deviceE, deviceUpdate, N);
+		//cudaMPImemcpyH2D(deviceUpdate, hostUpdate, Ract * sizeof(int));
+		cudaMPImemcpyH2D(deviceEnOr, hostEnOr, Ract * sizeof(EnOr));
+		copyreploffMPI(deviceSpin, deviceEnOr, Ract);
+		cudaMPIfree(deviceEnOr);free(hostEnOr);
+		// replicas exchange here
+		
+
+		defND(Ract,THREADS_C);
+		cudaCalcParSum(deviceSpin,Ract);
+
+		cudaMPImemset(Ridev, 0, sizeof(unsigned int));
+		cudablocksumKer(deviceSpin, Ract, Ridev);
+		cudaMPImemcpyD2H(&Ract, Ridev, sizeof(unsigned int));		
+		fullLBS = Ract * sizeof(Replica);
+		cudaMPImalloc((void**)&deviceSpinNew, fullLBS);
+		cudaresampleKer(deviceSpin,deviceSpinNew);
+		
+		//updateReplicasMPI(deviceSpin, deviceE, deviceUpdate);
+		cudaMPIfree(deviceSpin);
+		deviceSpin=deviceSpinNew;
+
+
+		
 		cudaPeekAtLastErrorMPI();
 		cudaDeviceSynchronizeMPI();
 		printf("\n");
 
 		//gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
+		ir++;
 	}
 	
 
 	// Free memory and close files
 	cudaMPIfree(deviceSpin);
-	cudaMPIfree(deviceE);
+	//cudaMPIfree(deviceE);
 	cudaMPIfree(deviceUpdate);
 	//cudaFree(deviceClusterSizeArray);
 	//cudaFree(deviceStack);
 	//cudaFree(deviceVisited);
 	//cudaFree(device_acceptance_number);
 
-	free(hostSpin);
-	free(hostE);
+	//free(hostSpin);
+	//free(hostE);
 	free(hostUpdate);
 	free(replicaFamily);
-	free(energyOrder);
+	//free(energyOrder);
 	//free(hostClusterSizeArray);
 	//free(hostSpin);
 
@@ -417,7 +596,14 @@ int main(int argc, char* argv[]) {
 	fclose(nfile);
 	fclose(chfile);
 	fclose(e3file);
+	
+	if(!wank){
+		free(hostrootEnOr);free(recvcounts);free(displs);
+	}
 
+	MPI_Type_free( &EnOrMPI );
+
+	MPI_Finalize();
 	// End
 	return 0;
 }

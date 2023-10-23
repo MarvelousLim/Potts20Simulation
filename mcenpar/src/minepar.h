@@ -3,6 +3,11 @@
 // float precission
 #define EPSILON 0.00001f
 
+#define L	32
+#define N	(L*L)
+
+#define EQthreads	128
+
 /*-----------------------------------------------------------------------------------------------------------
 		Name agreement:
 
@@ -41,16 +46,31 @@ struct neibors_indexes {
 };
 
 struct neibors {
-	char up;
-	char right;
-	char down;
-	char left;
+	signed char up;
+	signed char right;
+	signed char down;
+	signed char left;
 };
 
 struct energy_parts {
 	int Ising;
 	int Blume;
 };
+
+// struct for saving Replicas
+struct Replica {
+	signed char sp[N];
+	unsigned int ValInt[2];
+	unsigned int Roff;
+};
+// struct for processing EnergyOrder from all processes
+struct EnOr {
+	float Energy;
+	int Number;
+	int Rank;
+	unsigned int Roff;
+};	
+	
 
 #define FULL_MASK 0xffffffff
 

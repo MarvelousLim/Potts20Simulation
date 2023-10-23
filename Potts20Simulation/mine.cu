@@ -110,7 +110,7 @@ __device__ struct energy_parts subEnergyParts(struct energy_parts A, struct ener
 	return { A.Ising - B.Ising, A.Blume - B.Blume };
 }
 
-__device__ struct energy_parts calcEnergyParts(char* s, float* E, int L, int N, int r) {
+__device__ struct energy_parts calcEnergyParts(char* s, int L, int N, int r) {
 	struct energy_parts sum = { 0, 0 };
 	for (int j = 0; j < N; j++) {
 		// do not forget double joint summarization!
@@ -128,9 +128,9 @@ __device__ int calcEnergyFromParts(struct energy_parts energyParts, int D_div, i
 	return (D_base * energyParts.Ising / 2) + (D_div * energyParts.Blume); // div 2 because of double joint summarization
 }
 
-__global__ void deviceEnergy(char* s, float* E, int L, int N, int D_div, int D_base) {
+__global__ void deviceEnergy(char* s, int * E, int L, int N, int D_div, int D_base) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
-	struct energy_parts sum = calcEnergyParts(s, E, L, N, r);
+	struct energy_parts sum = calcEnergyParts(s, L, N, r);
 	E[r] = calcEnergyFromParts(sum, D_base, D_div);
 }
 
@@ -153,7 +153,7 @@ __device__ float warpReduceSum(float val)
 	return val;
 }
 
-__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E, int L, int N, int R, int q, int nSteps, float U, int D_div, int D_base, bool heat) {//, int* acceptance_number) {
+__global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, int L, int N, int R, int q, int nSteps, int U, int D_div, int D_base, bool heat) {//, int* acceptance_number) {
 	/*---------------------------------------------------------------------------------------------
 		Main Microcanonical Monte Carlo loop.  Performs update sweeps on each replica in the
 		population;
@@ -165,7 +165,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	int replica_shift = r * N;
 
-	struct energy_parts baseEnergyParts = calcEnergyParts(s, E, L, N, r);
+	struct energy_parts baseEnergyParts = calcEnergyParts(s, L, N, r);
 
 	for (int k = 0; k < N * nSteps; k++)
 	{
@@ -186,41 +186,10 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, float* E
 		struct energy_parts suggestedEnergyParts = addEnergyParts(baseEnergyParts, deltaLocalEnergyParts);
 		float suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D_div, D_base);
 
-		/*
-		if (r == 0) {
-			printf("thread: %i reports:\n", r);
-			printf("\tj: %i \n", j);
-			printf("\tcurrentSpin: %i \n", currentSpin);
-			printf("\tsuggestedSpin: %i \n", suggestedSpin);
-			printf("\tn_i.up: %i \n", n_i.up);
-			printf("\tn_i.right: %i \n", n_i.right);
-			printf("\tn_i.down: %i \n", n_i.down);
-			printf("\tn_i.left: %i \n", n_i.left);
-			printf("\tn.up: %i \n", n.up);
-			printf("\tn.right: %i \n", n.right);
-			printf("\tn.down: %i \n", n.down);
-			printf("\tn.left: %i \n", n.left);
-			printf("\tbaseEnergyParts: %i %i\n", baseEnergyParts.Ising, baseEnergyParts.Blume);
-			printf("\tsuggestedLocalEnergyParts: %i %i\n", suggestedLocalEnergyParts.Ising, suggestedLocalEnergyParts.Blume);
-			printf("\tcurrentLocalEnergyParts: %i %i\n", currentLocalEnergyParts.Ising, currentLocalEnergyParts.Blume);
-			printf("\tdeltaLocalEnergyParts: %i %i\n", deltaLocalEnergyParts.Ising, deltaLocalEnergyParts.Blume);
-			printf("\tsuggestedEnergyParts: %i %i\n", suggestedEnergyParts.Ising, suggestedEnergyParts.Blume);
-			printf("\tsuggestedEnergy: %f \n", suggestedEnergy);
-			printf("\tcondition result: %i \n",
-				((!heat && (suggestedEnergy + EPSILON < U)) || (heat && (suggestedEnergy - EPSILON > U))));
-			printf("thread: %i report end;\n", r);
-		}
-		*/
-
 		if ((!heat && (suggestedEnergy + EPSILON < U)) || (heat && (suggestedEnergy - EPSILON > U))) {
 			baseEnergyParts = suggestedEnergyParts;
 			E[r] = suggestedEnergy;
 			s[j + replica_shift] = suggestedSpin;
-			/*
-			float reductionRes = warpReduceSum(1);
-			if ((threadIdx.x & (warpSize - 1)) == 0)
-				atomicAdd(acceptance_number, reductionRes);
-			*/
 		}
 	}
 }
@@ -235,7 +204,7 @@ void CalcPrintAvgE(FILE* efile, int * E, int R, int U, int D_base) {
 	printf("E: %f\n", avg);
 }
 
-void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, float U) {
+void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, int U, int D_base) {
 	// histogram of family sizes
 	int* famHist = (int*)calloc(R, sizeof(int));
 	for (int i = 0; i < R; i++) {
@@ -246,7 +215,7 @@ void CalculateRhoT(const int* replicaFamily, FILE* ptfile, int R, float U) {
 		sum += famHist[i] * famHist[i];
 	}
 	sum /= R;
-	fprintf(ptfile, "%f %f\n", U, sum);
+	fprintf(ptfile, "%f %f\n", 1.0 * U / D_base, sum);
 	sum /= R;
 	printf("RhoT:\t%f\n", sum);
 	free(famHist);
@@ -317,7 +286,7 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 		}
 	}
 
-	if (fabs(*U - U_old) < EPSILON) {
+	if (fabs(*U - U_old) <= EPSILON) {
 		return 1; // out of replicas
 	}
 
@@ -347,7 +316,7 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	return 0;
 }
 
-__global__ void updateReplicas(char* s, float* E, int* update, int N) {
+__global__ void updateReplicas(char* s, int* E, int* update, int N) {
 	/*---------------------------------------------------------------------------------------------
 		Updates the population after the resampling step (done on cpu) by replacing indicated
 		replicas by the proper other replica
@@ -393,7 +362,8 @@ int main(int argc, char* argv[]) {
 	int q = 3;
 
 	//Blume-Capel model parameter
-	int D_div = atof(argv[6]), int D_base = atof(argv[7]);
+	int D_div = atoi(argv[6]);
+	int D_base = atoi(argv[7]);
 	float D = 1.0 * D_div / D_base;
 	bool heat = atoi(argv[8]); // 0 if cooling (default) and 1 if heating
 
@@ -516,7 +486,7 @@ int main(int argc, char* argv[]) {
 
 		// record average energy and rho t
 		CalcPrintAvgE(efile, hostE, R, U, D_base);
-		CalculateRhoT(replicaFamily, ptfile, R, U);
+		CalculateRhoT(replicaFamily, ptfile, R, U, D_base);
 		// perform resampling step on cpu
 		// also lowers energy seiling U
 
