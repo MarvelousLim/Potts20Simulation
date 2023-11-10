@@ -4,13 +4,24 @@
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
 # Mine
-Potts20Simulation/datasets/*
-Potts20Simulation/x64
+Potts20Simulation/cluster_image/
+Potts20Simulation/cluster_tmp/
+Potts20Simulation/datasets/
+Potts20Simulation/images/
+Potts20Simulation/marina_datasets/
+Potts20Simulation/old_images/
+Potts20Simulation/old_txt/
+Potts20Simulation/txt/
+Potts20Simulation/x64/
 Potts20Simulation/*.exe
 Potts20Simulation/*.exp
 Potts20Simulation/*.lib
 Potts20Simulation/*vcx*
+Potts20Simulation/*.ipynb_checkpoints
+Potts20Simulation/*.nb
+Potts20Simulation/*.py
 x64
+
 
 
 # User-specific files

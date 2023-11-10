@@ -1,7 +1,0 @@
-8	null	null
-12	null	null
-16	null	null
-20	null	null
-24	null	null
-32	null	null
-64	null	null
