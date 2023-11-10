@@ -17,6 +17,7 @@ Potts20Simulation/*.exe
 Potts20Simulation/*.exp
 Potts20Simulation/*.lib
 Potts20Simulation/*vcx*
+Potts20Simulation/*.ipynb
 Potts20Simulation/*.ipynb_checkpoints
 Potts20Simulation/*.nb
 Potts20Simulation/*.py
