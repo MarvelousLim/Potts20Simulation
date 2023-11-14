@@ -112,9 +112,10 @@ __device__ struct energy_parts subEnergyParts(struct energy_parts A, struct ener
 
 __device__ struct energy_parts calcEnergyParts(char* s, int L, int N, int r) {
 	struct energy_parts sum = { 0, 0 };
+	int replica_shift = r * N;
+
 	for (int j = 0; j < N; j++) {
 		// do not forget double joint summarization!
-		int replica_shift = r * N;
 		char i = s[j + replica_shift]; // current spin value
 		struct neibors_indexes n_i = SLF(j, L, N);
 		struct neibors n = get_neibors_values(s, n_i, replica_shift); // we look into r replica and j spin
@@ -184,7 +185,7 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, 
 		//but not Blume part!
 		deltaLocalEnergyParts.Ising *= 2;
 		struct energy_parts suggestedEnergyParts = addEnergyParts(baseEnergyParts, deltaLocalEnergyParts);
-		float suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D_div, D_base);
+		int suggestedEnergy = calcEnergyFromParts(suggestedEnergyParts, D_div, D_base);
 
 		if ((!heat && (suggestedEnergy + EPSILON < U)) || (heat && (suggestedEnergy - EPSILON > U))) {
 			baseEnergyParts = suggestedEnergyParts;
@@ -193,6 +194,39 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, 
 		}
 	}
 }
+
+__global__ void calcMagnetization(char* s, int* E, int N, int R, int U, int* deviceMagnetization) {//, int* acceptance_number) {
+
+	int r = threadIdx.x + blockIdx.x * blockDim.x;
+	int replica_shift = r * N;
+	if (E[r] == U) {
+		int n = 0;
+		int m = 0;
+		int m_sq = 0;
+
+
+		for (int j = 0; j < N; j++) {
+			char i = s[j + replica_shift]; // current spin value
+
+			n++;
+			m += i;
+			m_sq += i * i;
+		}
+
+		int reductionRes = warpReduceSum(n);
+		if ((threadIdx.x & (warpSize - 1)) == 0)
+			atomicAdd(deviceMagnetization, reductionRes); // number of replicas with E = U
+
+		reductionRes = warpReduceSum(m);
+		if ((threadIdx.x & (warpSize - 1)) == 0)
+			atomicAdd(deviceMagnetization + 1, reductionRes); // | sum(sigma) |
+
+		reductionRes = warpReduceSum(m_sq);
+		if ((threadIdx.x & (warpSize - 1)) == 0)
+			atomicAdd(deviceMagnetization + 2, reductionRes); // | sum(sigma^2) |
+	}
+}
+
 
 void CalcPrintAvgE(FILE* efile, int * E, int R, int U, int D_base) {
 	float avg = 0.0;
@@ -272,7 +306,7 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	quicksort(E, O, 0, R - 1, 1 - 2 * heat); //Sorts O by energy
 
 	int nCull = 0;
-	fprintf(e2file, "%f %f\n", 1.0 * (*U) / D_base, E[O[0]]);
+	fprintf(e2file, "%f %i\n", 1.0 * (*U) / D_base, E[O[0]]);
 
 	//update energy seiling to the highest available energy
 	int U_old = *U;
@@ -300,6 +334,7 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	double X = nCull;
 	X /= R;
 	fprintf(Xfile, "%f %f\n", 1.0 * (*U) / D_base, X);
+	fflush(Xfile);
 	printf("Culling fraction:\t%f\n", X);
 	fflush(stdout);
 	for (int i = 0; i < R; i++)
@@ -314,6 +349,11 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	}
 
 	return 0;
+}
+
+void PrintMagnetization(int* U, int D_base, FILE* mfile, int* hostMagnetization) {
+	fprintf(mfile, "%f %d %d %d\n", 1.0 * (*U) / D_base, hostMagnetization[0], hostMagnetization[1], hostMagnetization[2]);
+	fflush(mfile);
 }
 
 __global__ void updateReplicas(char* s, int* E, int* update, int N) {
@@ -374,18 +414,20 @@ int main(int argc, char* argv[]) {
 	printf("running 2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt\n", heating, q, D, N, R, nSteps, run_number);
 
 	char s[100];
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
+	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dm.txt", heating, q, D, N, R, nSteps, run_number);
+	FILE* mfile = fopen(s, "w");	// magnetization in format m = sum(sigma), m^2=sum(sigma^2), N
 	/*
 	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
 	FILE* e3file = fopen(s, "w");
@@ -407,14 +449,17 @@ int main(int argc, char* argv[]) {
 		energyOrder[i] = i;
 		replicaFamily[i] = i;
 	}
+	int* hostMagnetization = (int*)malloc(3 * sizeof(int));
 
 	// Allocate memory on device
 	char* deviceSpin; // s, d_s
 	int* deviceE;
 	int* deviceUpdate;
+	int* deviceMagnetization;
 	gpuErrchk(cudaMalloc((void**)&deviceSpin, fullLatticeByteSize));
 	gpuErrchk(cudaMalloc((void**)&deviceE, R * sizeof(int)));
 	gpuErrchk(cudaMalloc((void**)&deviceUpdate, R * sizeof(int)));
+	gpuErrchk(cudaMalloc((void**)&deviceMagnetization, 3 * sizeof(int)));
 
 	// Allocate memory for histogram calculation
 	/*
@@ -466,23 +511,25 @@ int main(int argc, char* argv[]) {
 	*/
 
 
-
-	float upper_energy = N * D_div + 2 * N * D_base;
-	float lower_energy = -N * D_div - 2 * N * D_base;
+	int upper_energy = N * D_div + 2 * N * D_base;
+	int lower_energy = -N * D_div - 2 * N * D_base;
 
 	int U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
 
 	//CalcPrintAvgE(efile, hostE, R, U);
 
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
-		fprintf(nfile, "%f %d\n", U, nSteps);
+		cudaMemset(deviceMagnetization, 0, 3 * sizeof(int));
+
+		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%f out of %d; nSteps: %d;\n", 1.0 * U / D_base, -2 * N, nSteps);
 
 		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D_div, D_base, heat);// , device_acceptance_number);
+		calcMagnetization <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, N, R, U, deviceMagnetization);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
-
+		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, 3 * sizeof(int), cudaMemcpyDeviceToHost));
 
 		// record average energy and rho t
 		CalcPrintAvgE(efile, hostE, R, U, D_base);
@@ -491,6 +538,9 @@ int main(int argc, char* argv[]) {
 		// also lowers energy seiling U
 
 		int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, D_base, e2file, Xfile, heat);
+
+		PrintMagnetization(&U, D_base, mfile, hostMagnetization);
+
 		if (error)
 		{
 			printf("Process ended with zero replicas\n");
@@ -513,11 +563,13 @@ int main(int argc, char* argv[]) {
 	cudaFree(deviceSpin);
 	cudaFree(deviceE);
 	cudaFree(deviceUpdate);
+	cudaFree(deviceMagnetization);
 	//cudaFree(deviceClusterSizeArray);
 	//cudaFree(deviceStack);
 	//cudaFree(deviceVisited);
 	//cudaFree(device_acceptance_number);
-
+	
+	free(hostMagnetization);
 	free(hostSpin);
 	free(hostE);
 	free(hostUpdate);
@@ -526,13 +578,14 @@ int main(int argc, char* argv[]) {
 	//free(hostClusterSizeArray);
 	free(hostSpin);
 
-	fclose(efile);
+	/*fclose(efile);
 	fclose(e2file);
 	fclose(Xfile);
 	fclose(ptfile);
 	fclose(nfile);
 	fclose(chfile);
-	//fclose(e3file);
+	fclose(mfile);
+	*///fclose(e3file);
 	/*
 	fclose(sfile);
 	*/

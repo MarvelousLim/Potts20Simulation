@@ -4,6 +4,7 @@
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
 # Mine
+Potts20Simulation/AR_datasets/
 Potts20Simulation/cluster_image/
 Potts20Simulation/cluster_tmp/
 Potts20Simulation/datasets/
@@ -364,3 +365,4 @@ healthchecksdb
 /Potts20Simulation/1DIsingTMES.ipynb
 /Potts20Simulation/.ipynb_checkpoints/1DIsingTMES-checkpoint.ipynb
 /vcpkg
+/Potts20Simulation/2DIsing_DOS_L40.txt
