@@ -198,9 +198,9 @@ __global__ void equilibrate(curandStatePhilox4_32_10_t* state, char* s, int* E, 
 __global__ void calcMagnetization(char* s, int* E, int N, int R, int U, int* deviceMagnetization) {//, int* acceptance_number) {
 
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
+	//printf("kernel %d reporting: E = %i, U = %i\n", r, E[r], U);
 	int replica_shift = r * N;
 	if (E[r] == U) {
-		int n = 0;
 		int m = 0;
 		int m_sq = 0;
 
@@ -208,22 +208,14 @@ __global__ void calcMagnetization(char* s, int* E, int N, int R, int U, int* dev
 		for (int j = 0; j < N; j++) {
 			char i = s[j + replica_shift]; // current spin value
 
-			n++;
 			m += i;
 			m_sq += i * i;
 		}
+		//printf("kernel %d reporting success: E = %i, U = %i; m=%i, m_sq=%i\n", r, E[r], U, m, m_sq);
 
-		int reductionRes = warpReduceSum(n);
-		if ((threadIdx.x & (warpSize - 1)) == 0)
-			atomicAdd(deviceMagnetization, reductionRes); // number of replicas with E = U
-
-		reductionRes = warpReduceSum(m);
-		if ((threadIdx.x & (warpSize - 1)) == 0)
-			atomicAdd(deviceMagnetization + 1, reductionRes); // | sum(sigma) |
-
-		reductionRes = warpReduceSum(m_sq);
-		if ((threadIdx.x & (warpSize - 1)) == 0)
-			atomicAdd(deviceMagnetization + 2, reductionRes); // | sum(sigma^2) |
+		atomicAdd(&deviceMagnetization[0], 1); // number of replicas with E = U
+		atomicAdd(&deviceMagnetization[1], m); // | sum(sigma) |
+		atomicAdd(&deviceMagnetization[2], m_sq); // | sum(sigma) |
 	}
 }
 
@@ -333,6 +325,7 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	// culling fraction
 	double X = nCull;
 	X /= R;
+	//printf("U: %d %d %d\n", U_new, U_old, *U);
 	fprintf(Xfile, "%f %f\n", 1.0 * (*U) / D_base, X);
 	fflush(Xfile);
 	printf("Culling fraction:\t%f\n", X);
@@ -519,17 +512,14 @@ int main(int argc, char* argv[]) {
 	//CalcPrintAvgE(efile, hostE, R, U);
 
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
-		cudaMemset(deviceMagnetization, 0, 3 * sizeof(int));
 
 		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%f out of %d; nSteps: %d;\n", 1.0 * U / D_base, -2 * N, nSteps);
 
 		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D_div, D_base, heat);// , device_acceptance_number);
-		calcMagnetization <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, N, R, U, deviceMagnetization);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
-		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, 3 * sizeof(int), cudaMemcpyDeviceToHost));
 
 		// record average energy and rho t
 		CalcPrintAvgE(efile, hostE, R, U, D_base);
@@ -539,7 +529,14 @@ int main(int argc, char* argv[]) {
 
 		int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, D_base, e2file, Xfile, heat);
 
+
+		cudaMemset(deviceMagnetization, 0, 3 * sizeof(int));
+		calcMagnetization <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, N, R, U, deviceMagnetization);
+		gpuErrchk(cudaPeekAtLastError());
+		gpuErrchk(cudaDeviceSynchronize());
+		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, 3 * sizeof(int), cudaMemcpyDeviceToHost));
 		PrintMagnetization(&U, D_base, mfile, hostMagnetization);
+
 
 		if (error)
 		{
@@ -578,14 +575,15 @@ int main(int argc, char* argv[]) {
 	//free(hostClusterSizeArray);
 	free(hostSpin);
 
-	/*fclose(efile);
+	fclose(efile);
 	fclose(e2file);
 	fclose(Xfile);
 	fclose(ptfile);
 	fclose(nfile);
 	fclose(chfile);
 	fclose(mfile);
-	*///fclose(e3file);
+	
+	//fclose(e3file);
 	/*
 	fclose(sfile);
 	*/
