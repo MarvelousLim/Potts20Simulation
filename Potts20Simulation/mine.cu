@@ -8,7 +8,7 @@
 #include <time.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-
+#define STATISTICS_NUMBER 5
 #define EPSILON 0
 
 // check errors
@@ -207,15 +207,16 @@ __global__ void calcMagnetization(char* s, int* E, int N, int R, int U, int* dev
 
 		for (int j = 0; j < N; j++) {
 			char i = s[j + replica_shift]; // current spin value
-
 			m += i;
 			m_sq += i * i;
 		}
 		//printf("kernel %d reporting success: E = %i, U = %i; m=%i, m_sq=%i\n", r, E[r], U, m, m_sq);
 
-		atomicAdd(&deviceMagnetization[0], 1); // number of replicas with E = U
-		atomicAdd(&deviceMagnetization[1], m); // | sum(sigma) |
-		atomicAdd(&deviceMagnetization[2], m_sq); // | sum(sigma) |
+		deviceMagnetization[r * STATISTICS_NUMBER + 0] = 1; // number of replicas with E = U
+		deviceMagnetization[r * STATISTICS_NUMBER + 1] = abs(m); // | magnetization |
+		deviceMagnetization[r * STATISTICS_NUMBER + 2] = m * m; // | magnetization^2 |
+		deviceMagnetization[r * STATISTICS_NUMBER + 3] = m_sq; // | concentration |
+		deviceMagnetization[r * STATISTICS_NUMBER + 4] = m_sq * m_sq; // | concentration^2 |
 	}
 }
 
@@ -344,8 +345,18 @@ int resample(int* E, int* O, int* update, int* replicaFamily, int R, int* U, int
 	return 0;
 }
 
-void PrintMagnetization(int* U, int D_base, FILE* mfile, int* hostMagnetization) {
-	fprintf(mfile, "%f %d %d %d\n", 1.0 * (*U) / D_base, hostMagnetization[0], hostMagnetization[1], hostMagnetization[2]);
+void PrintMagnetization(int* U, int D_base, FILE* mfile, int R, int* hostMagnetization) {
+	long long int n[STATISTICS_NUMBER];
+	for (int j = 0; j < STATISTICS_NUMBER; j++) {
+		n[j] = 0;
+	}
+
+	for (int i = 0; i < R; i++) {
+		for (int j = 0; j < STATISTICS_NUMBER; j++) {
+			n[j] += hostMagnetization[i * STATISTICS_NUMBER + j];
+		}
+	}
+	fprintf(mfile, "%f %lld %lld %lld %lld %lld\n", 1.0 * (*U) / D_base, n[0], n[1], n[2], n[3], n[4]);
 	fflush(mfile);
 }
 
@@ -397,7 +408,7 @@ int main(int argc, char* argv[]) {
 	//Blume-Capel model parameter
 	int D_div = atoi(argv[6]);
 	int D_base = atoi(argv[7]);
-	float D = 1.0 * D_div / D_base;
+	float D = (float)D_div / D_base;
 	bool heat = atoi(argv[8]); // 0 if cooling (default) and 1 if heating
 
 
@@ -442,7 +453,8 @@ int main(int argc, char* argv[]) {
 		energyOrder[i] = i;
 		replicaFamily[i] = i;
 	}
-	int* hostMagnetization = (int*)malloc(3 * sizeof(int));
+	int MagnetizationArraySize = R * STATISTICS_NUMBER;
+	int* hostMagnetization = (int*)malloc(MagnetizationArraySize * sizeof(int));
 
 	// Allocate memory on device
 	char* deviceSpin; // s, d_s
@@ -452,7 +464,7 @@ int main(int argc, char* argv[]) {
 	gpuErrchk(cudaMalloc((void**)&deviceSpin, fullLatticeByteSize));
 	gpuErrchk(cudaMalloc((void**)&deviceE, R * sizeof(int)));
 	gpuErrchk(cudaMalloc((void**)&deviceUpdate, R * sizeof(int)));
-	gpuErrchk(cudaMalloc((void**)&deviceMagnetization, 3 * sizeof(int)));
+	gpuErrchk(cudaMalloc((void**)&deviceMagnetization, MagnetizationArraySize * sizeof(int)));
 
 	// Allocate memory for histogram calculation
 	/*
@@ -510,6 +522,8 @@ int main(int argc, char* argv[]) {
 	int U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
 
 	//CalcPrintAvgE(efile, hostE, R, U);
+	printf("sizeof int% d\n", sizeof(int));
+	printf("sizeof int% d\n", sizeof(int));
 
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
 
@@ -530,12 +544,12 @@ int main(int argc, char* argv[]) {
 		int error = resample(hostE, energyOrder, hostUpdate, replicaFamily, R, &U, D_base, e2file, Xfile, heat);
 
 
-		cudaMemset(deviceMagnetization, 0, 3 * sizeof(int));
+		cudaMemset(deviceMagnetization, 0, MagnetizationArraySize * sizeof(int));
 		calcMagnetization <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, N, R, U, deviceMagnetization);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
-		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, 3 * sizeof(int), cudaMemcpyDeviceToHost));
-		PrintMagnetization(&U, D_base, mfile, hostMagnetization);
+		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, MagnetizationArraySize * sizeof(int), cudaMemcpyDeviceToHost));
+		PrintMagnetization(&U, D_base, mfile, R, hostMagnetization);
 
 
 		if (error)
