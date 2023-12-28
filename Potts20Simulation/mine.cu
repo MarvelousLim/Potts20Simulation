@@ -516,8 +516,8 @@ int main(int argc, char* argv[]) {
 	*/
 
 
-	int upper_energy = N * D_div + 2 * N * D_base;
-	int lower_energy = -N * D_div - 2 * N * D_base;
+	int upper_energy = N * abs(D_div) + 2 * N * D_base;
+	int lower_energy = -N * abs(D_div) - 2 * N * D_base;
 
 	int U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
 
@@ -551,7 +551,6 @@ int main(int argc, char* argv[]) {
 		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, MagnetizationArraySize * sizeof(int), cudaMemcpyDeviceToHost));
 		PrintMagnetization(&U, D_base, mfile, R, hostMagnetization);
 
-
 		if (error)
 		{
 			printf("Process ended with zero replicas\n");
@@ -567,6 +566,28 @@ int main(int argc, char* argv[]) {
 
 	}
 
+
+	// print hostSpin into a file
+	//if ((-0.5 * L * L >= U) && (U >= -2 * L * L) && ((U + L * L / 2) % ((L * L) / 100) == 0)) {
+		//diff with E=-0.5 is set to 0.01
+	/*
+	cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost);
+	sprintf(s, "datasets//spin_samples//2DBlume%d_N%d_R%d_nSteps%d_run%d_U%fs.txt", q, N, R, nSteps, run_number, 1.0 * U / (L * L));
+	FILE* sfile = fopen(s, "w");
+	int r_counter = 0;
+	for (int i = 0; i <= R; i++) {
+		if (hostE[i] == U) {
+			r_counter++;
+			int replica_shift = i * N;
+			for (int k = 0; k < N; k++) {
+				fprintf(sfile, "%d ", (int)hostSpin[replica_shift + k]);
+			}
+		}
+		if (r_counter >= 8192)
+			break;
+	}
+	fclose(sfile);
+	*/
 
 
 	// Free memory and close files
@@ -598,9 +619,6 @@ int main(int argc, char* argv[]) {
 	fclose(mfile);
 	
 	//fclose(e3file);
-	/*
-	fclose(sfile);
-	*/
 
 	// End
 	return 0;
