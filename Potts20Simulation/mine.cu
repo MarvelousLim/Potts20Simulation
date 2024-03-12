@@ -8,7 +8,7 @@
 #include <time.h>
 
 #define NNEIBORS 4 // number of nearest neighbors, is 4 for 2d lattice
-#define STATISTICS_NUMBER 5
+#define STATISTICS_NUMBER 7
 #define EPSILON 0
 
 // check errors
@@ -129,10 +129,10 @@ __device__ int calcEnergyFromParts(struct energy_parts energyParts, int D_div, i
 	return (D_base * energyParts.Ising / 2) + (D_div * energyParts.Blume); // div 2 because of double joint summarization
 }
 
-__global__ void deviceEnergy(char* s, int * E, int L, int N, int D_div, int D_base) {
+__global__ void deviceEnergy(char* s, int* E, int L, int N, int D_div, int D_base) {
 	int r = threadIdx.x + blockIdx.x * blockDim.x;
 	struct energy_parts sum = calcEnergyParts(s, L, N, r);
-	E[r] = calcEnergyFromParts(sum, D_base, D_div);
+	E[r] = calcEnergyFromParts(sum, D_div, D_base);
 }
 
 // hardcoded spin suggestion for init
@@ -215,13 +215,15 @@ __global__ void calcMagnetization(char* s, int* E, int N, int R, int U, int* dev
 		deviceMagnetization[r * STATISTICS_NUMBER + 0] = 1; // number of replicas with E = U
 		deviceMagnetization[r * STATISTICS_NUMBER + 1] = abs(m); // | magnetization |
 		deviceMagnetization[r * STATISTICS_NUMBER + 2] = m * m; // | magnetization^2 |
-		deviceMagnetization[r * STATISTICS_NUMBER + 3] = m_sq; // | concentration |
-		deviceMagnetization[r * STATISTICS_NUMBER + 4] = m_sq * m_sq; // | concentration^2 |
+		deviceMagnetization[r * STATISTICS_NUMBER + 3] = m * m * m * m; // | magnetization^2 |
+		deviceMagnetization[r * STATISTICS_NUMBER + 4] = m_sq; // | concentration |
+		deviceMagnetization[r * STATISTICS_NUMBER + 5] = m_sq * m_sq; // | concentration^2 |
+		deviceMagnetization[r * STATISTICS_NUMBER + 6] = m_sq * m_sq * m_sq * m_sq; // | concentration^2 |
 	}
 }
 
 
-void CalcPrintAvgE(FILE* efile, int * E, int R, int U, int D_base) {
+void CalcPrintAvgE(FILE* efile, int* E, int R, int U, int D_base) {
 	float avg = 0.0;
 	for (int i = 0; i < R; i++) {
 		avg += E[i];
@@ -356,7 +358,12 @@ void PrintMagnetization(int* U, int D_base, FILE* mfile, int R, int* hostMagneti
 			n[j] += hostMagnetization[i * STATISTICS_NUMBER + j];
 		}
 	}
-	fprintf(mfile, "%f %lld %lld %lld %lld %lld\n", 1.0 * (*U) / D_base, n[0], n[1], n[2], n[3], n[4]);
+	fprintf(mfile, "%f", 1.0 * (*U) / D_base);
+	for (int j = 0; j < STATISTICS_NUMBER; j++) {
+		fprintf(mfile, "%lld ", n[j]);
+	}
+	fprintf(mfile, "\n ");
+	fflush(mfile);
 	fflush(mfile);
 }
 
@@ -386,6 +393,11 @@ __global__ void setup_kernel(curandStatePhilox4_32_10_t* state, int seed)
 }
 
 int main(int argc, char* argv[]) {
+
+	clock_t start, end;
+	double cpu_time_used;
+
+	start = clock();
 
 	// Parameters:
 
@@ -418,19 +430,20 @@ int main(int argc, char* argv[]) {
 	printf("running 2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt\n", heating, q, D, N, R, nSteps, run_number);
 
 	char s[100];
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", heating, q, D, N, R, nSteps, run_number);
+	const char* prefix = "2DBlume";
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* efile = fopen(s, "w");	// average energy
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de2.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* e2file = fopen(s, "w");	// surface (culled) energy
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dX.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* Xfile = fopen(s, "w");	// culling fraction
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dpt.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* ptfile = fopen(s, "w");	// rho t
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dn.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* nfile = fopen(s, "w");	// number of sweeps
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dch.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* chfile = fopen(s, "w");	// cluster size histogram
-	sprintf(s, "datasets//test//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dm.txt", heating, q, D, N, R, nSteps, run_number);
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dm.txt", prefix, heating, q, D, N, R, nSteps, run_number);
 	FILE* mfile = fopen(s, "w");	// magnetization in format m = sum(sigma), m^2=sum(sigma^2), N
 	/*
 	sprintf(s, "datasets//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%de3.txt", heating, q, D, N, R, nSteps, run_number);
@@ -444,7 +457,7 @@ int main(int argc, char* argv[]) {
 	size_t fullLatticeByteSize = R * N * sizeof(char);
 
 	// Allocate space on host
-	char* hostSpin = (char*)malloc(fullLatticeByteSize);
+	//char* hostSpin = (char*)malloc(fullLatticeByteSize);
 	int* hostE = (int*)malloc(R * sizeof(int));
 	int* hostUpdate = (int*)malloc(R * sizeof(int));
 	int* replicaFamily = (int*)malloc(R * sizeof(int));
@@ -480,7 +493,7 @@ int main(int argc, char* argv[]) {
 	// Init Philox
 	curandStatePhilox4_32_10_t* devStates;
 	gpuErrchk(cudaMalloc((void**)&devStates, R * sizeof(curandStatePhilox4_32_10_t)));
-	setup_kernel <<< BLOCKS, THREADS >>> (devStates, seed);
+	setup_kernel << < BLOCKS, THREADS >> > (devStates, seed);
 	gpuErrchk(cudaPeekAtLastError());
 	gpuErrchk(cudaDeviceSynchronize());
 
@@ -488,7 +501,7 @@ int main(int argc, char* argv[]) {
 	srand(seed);
 
 	// Actually working part
-	initializePopulation <<< BLOCKS, THREADS >>> (devStates, deviceSpin, N, q);
+	initializePopulation << < BLOCKS, THREADS >> > (devStates, deviceSpin, N, q);
 	gpuErrchk(cudaPeekAtLastError());
 	gpuErrchk(cudaDeviceSynchronize());
 	cudaMemset(deviceE, 0, R * sizeof(int));
@@ -522,15 +535,13 @@ int main(int argc, char* argv[]) {
 	int U = (heat ? lower_energy : upper_energy);	// U is energy ceiling
 
 	//CalcPrintAvgE(efile, hostE, R, U);
-	printf("sizeof int% d\n", sizeof(int));
-	printf("sizeof int% d\n", sizeof(int));
 
 	while ((U >= lower_energy && !heat) || (U <= upper_energy && heat)) {
 
 		fprintf(nfile, "%d %d\n", U, nSteps);
 		printf("U:\t%f out of %d; nSteps: %d;\n", 1.0 * U / D_base, -2 * N, nSteps);
 
-		equilibrate <<< BLOCKS, THREADS >>> (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D_div, D_base, heat);// , device_acceptance_number);
+		equilibrate << < BLOCKS, THREADS >> > (devStates, deviceSpin, deviceE, L, N, R, q, nSteps, U, D_div, D_base, heat);// , device_acceptance_number);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		gpuErrchk(cudaMemcpy(hostE, deviceE, R * sizeof(int), cudaMemcpyDeviceToHost));
@@ -545,11 +556,12 @@ int main(int argc, char* argv[]) {
 
 
 		cudaMemset(deviceMagnetization, 0, MagnetizationArraySize * sizeof(int));
-		calcMagnetization <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, N, R, U, deviceMagnetization);
+		calcMagnetization << < BLOCKS, THREADS >> > (deviceSpin, deviceE, N, R, U, deviceMagnetization);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		gpuErrchk(cudaMemcpy(hostMagnetization, deviceMagnetization, MagnetizationArraySize * sizeof(int), cudaMemcpyDeviceToHost));
 		PrintMagnetization(&U, D_base, mfile, R, hostMagnetization);
+
 
 		if (error)
 		{
@@ -558,7 +570,7 @@ int main(int argc, char* argv[]) {
 		}
 		// copy list of replicas to update back to gpu
 		gpuErrchk(cudaMemcpy(deviceUpdate, hostUpdate, R * sizeof(int), cudaMemcpyHostToDevice));
-		updateReplicas <<< BLOCKS, THREADS >>> (deviceSpin, deviceE, deviceUpdate, N);
+		updateReplicas <<< BLOCKS, THREADS >> > (deviceSpin, deviceE, deviceUpdate, N);
 		gpuErrchk(cudaPeekAtLastError());
 		gpuErrchk(cudaDeviceSynchronize());
 		printf("\n");
@@ -566,28 +578,6 @@ int main(int argc, char* argv[]) {
 
 	}
 
-
-	// print hostSpin into a file
-	//if ((-0.5 * L * L >= U) && (U >= -2 * L * L) && ((U + L * L / 2) % ((L * L) / 100) == 0)) {
-		//diff with E=-0.5 is set to 0.01
-	/*
-	cudaMemcpy(hostSpin, deviceSpin, fullLatticeByteSize, cudaMemcpyDeviceToHost);
-	sprintf(s, "datasets//spin_samples//2DBlume%d_N%d_R%d_nSteps%d_run%d_U%fs.txt", q, N, R, nSteps, run_number, 1.0 * U / (L * L));
-	FILE* sfile = fopen(s, "w");
-	int r_counter = 0;
-	for (int i = 0; i <= R; i++) {
-		if (hostE[i] == U) {
-			r_counter++;
-			int replica_shift = i * N;
-			for (int k = 0; k < N; k++) {
-				fprintf(sfile, "%d ", (int)hostSpin[replica_shift + k]);
-			}
-		}
-		if (r_counter >= 8192)
-			break;
-	}
-	fclose(sfile);
-	*/
 
 
 	// Free memory and close files
@@ -600,15 +590,14 @@ int main(int argc, char* argv[]) {
 	//cudaFree(deviceStack);
 	//cudaFree(deviceVisited);
 	//cudaFree(device_acceptance_number);
-	
+
 	free(hostMagnetization);
-	free(hostSpin);
+	//free(hostSpin);
 	free(hostE);
 	free(hostUpdate);
 	free(replicaFamily);
 	free(energyOrder);
 	//free(hostClusterSizeArray);
-	free(hostSpin);
 
 	fclose(efile);
 	fclose(e2file);
@@ -617,11 +606,19 @@ int main(int argc, char* argv[]) {
 	fclose(nfile);
 	fclose(chfile);
 	fclose(mfile);
-	
+
 	//fclose(e3file);
+
+	end = clock();
+	cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
+
+	sprintf(s, "datasets//%s//2DBlume%s_q%d_D%f_N%d_R%d_nSteps%d_run%dtime.txt", prefix, heating, q, D, N, R, nSteps, run_number);
+	FILE* timefile = fopen(s, "w");
+
+	fprintf(timefile, "%f seconds", cpu_time_used);
+
+	fclose(timefile);
 
 	// End
 	return 0;
 }
-
-
